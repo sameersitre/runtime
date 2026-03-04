@@ -3,10 +3,12 @@ import type { FloTraceConfig, TrackingOptions } from './types';
 import { DEFAULT_CONFIG } from './types';
 import { getWebSocketClient, disposeWebSocketClient } from './websocketClient';
 import { serializeProps, getChangedKeys } from './serializer';
-import { installFiberTreeWalker, uninstallFiberTreeWalker, requestTreeSnapshot, requestFullSnapshot, getNodeProps } from './fiberTreeWalker';
+import { installFiberTreeWalker, uninstallFiberTreeWalker, requestTreeSnapshot, requestFullSnapshot, getNodeProps, getNodeHooks, getNodeEffects, getDetailedRenderReason } from './fiberTreeWalker';
 import { installZustandTracker, uninstallZustandTracker } from './zustandTracker';
 import { installReduxTracker, uninstallReduxTracker, type ReduxStoreApi } from './reduxTracker';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
+import { installTimelineTracker, uninstallTimelineTracker, getTimeline } from './timelineTracker';
+import { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
 
 // Module-level timer for deferred cleanup (React Strict Mode handling).
 // When Strict Mode unmounts then remounts, we cancel this timer so the
@@ -143,6 +145,12 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
               console.error('[FloTrace] Failed to install Router tracker:', error);
             }
           }
+          // Timeline tracker — always install with tracking (captures mount/render events)
+          try {
+            installTimelineTracker(client);
+          } catch (error) {
+            console.error('[FloTrace] Failed to install Timeline tracker:', error);
+          }
           console.log('[FloTrace] Tracking started with options:', message.options);
           break;
 
@@ -152,6 +160,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
           try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Zustand tracker:', e); }
           try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Redux tracker:', e); }
           try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Router tracker:', e); }
+          try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Timeline tracker:', e); }
+          try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Console tracker:', e); }
           console.log('[FloTrace] Tracking stopped');
           break;
 
@@ -179,9 +189,88 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
           break;
         }
 
+        case 'ext:requestNodeHooks': {
+          const hookNodeId = (message as { nodeId?: string }).nodeId;
+          if (hookNodeId) {
+            const hooks = getNodeHooks(hookNodeId);
+            client.sendImmediate({
+              type: 'runtime:nodeHooks',
+              nodeId: hookNodeId,
+              hooks: hooks || [],
+              timestamp: Date.now(),
+            });
+          }
+          break;
+        }
+
+        case 'ext:requestNodeEffects': {
+          const effectNodeId = (message as { nodeId?: string }).nodeId;
+          if (effectNodeId) {
+            const effects = getNodeEffects(effectNodeId);
+            client.sendImmediate({
+              type: 'runtime:nodeEffects',
+              nodeId: effectNodeId,
+              effects: effects || [],
+              timestamp: Date.now(),
+            });
+          }
+          break;
+        }
+
+        case 'ext:requestDetailedRenderReason': {
+          const reasonNodeId = (message as { nodeId?: string }).nodeId;
+          if (reasonNodeId) {
+            const reason = getDetailedRenderReason(reasonNodeId);
+            if (reason) {
+              client.sendImmediate({
+                type: 'runtime:detailedRenderReason',
+                nodeId: reasonNodeId,
+                reason,
+                timestamp: Date.now(),
+              });
+            }
+          }
+          break;
+        }
+
         case 'ext:requestFullSnapshot':
           requestFullSnapshot();
           console.log('[FloTrace] Full snapshot requested by extension');
+          break;
+
+        case 'ext:requestTimeline': {
+          const timelineNodeId = (message as { nodeId?: string }).nodeId;
+          if (timelineNodeId) {
+            const events = getTimeline(timelineNodeId);
+            const componentName = timelineNodeId.split('/').pop()?.replace(/-\d+$/, '') ?? 'Unknown';
+            for (const event of events) {
+              client.sendImmediate({
+                type: 'runtime:timelineEvent',
+                nodeId: timelineNodeId,
+                componentName,
+                event,
+              });
+            }
+          }
+          break;
+        }
+
+        case 'ext:startConsoleCapture':
+          try {
+            installConsoleTracker(client);
+            console.log('[FloTrace] Console capture started');
+          } catch (error) {
+            console.error('[FloTrace] Failed to install Console tracker:', error);
+          }
+          break;
+
+        case 'ext:stopConsoleCapture':
+          try {
+            uninstallConsoleTracker();
+            console.log('[FloTrace] Console capture stopped');
+          } catch (error) {
+            console.error('[FloTrace] Error stopping Console tracker:', error);
+          }
           break;
 
         case 'ext:requestState':
@@ -210,6 +299,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
         try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (zustandTracker):', e); }
         try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (reduxTracker):', e); }
         try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (routerTracker):', e); }
+        try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (timelineTracker):', e); }
+        try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (consoleTracker):', e); }
         try { disposeWebSocketClient(); } catch (e) { console.error('[FloTrace] Error during cleanup (websocketClient):', e); }
       }, 100);
     };

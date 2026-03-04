@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -156,6 +156,137 @@ interface LiveTreeNode {
     renderReason?: 'mount' | 'props-changed' | 'state-or-context' | 'parent';
 }
 /**
+ * Enhanced render reason with specific prop/state/context changes.
+ */
+type DetailedRenderReasonType = 'mount' | 'props-changed' | 'state-changed' | 'context-changed' | 'parent-render' | 'force-update';
+interface PropChange {
+    key: string;
+    prev: SerializedValue;
+    next: SerializedValue;
+}
+type DetailedRenderReason = {
+    type: 'mount';
+} | {
+    type: 'props-changed';
+    changedProps: PropChange[];
+} | {
+    type: 'state-changed';
+    changedHookIndices: number[];
+} | {
+    type: 'context-changed';
+    contextNames: string[];
+} | {
+    type: 'parent-render';
+    parentName?: string;
+} | {
+    type: 'force-update';
+};
+/**
+ * Hook type classification — inferred from fiber.memoizedState shape.
+ */
+type HookType = 'useState' | 'useReducer' | 'useRef' | 'useMemo' | 'useCallback' | 'useEffect' | 'useLayoutEffect' | 'useInsertionEffect' | 'useContext' | 'useImperativeHandle' | 'useDebugValue' | 'useTransition' | 'useDeferredValue' | 'useId' | 'useSyncExternalStore' | 'useOptimistic' | 'useFormStatus' | 'unknown';
+/**
+ * Information about a single hook in a component's hook linked list.
+ */
+interface HookInfo {
+    /** Position in the hook linked list (0-based) */
+    index: number;
+    /** Classified hook type */
+    type: HookType;
+    /** Serialized current value (state for useState, ref.current for useRef, etc.) */
+    value: SerializedValue;
+    /** For useMemo/useCallback/useEffect: serialized dependency array */
+    deps?: SerializedValue[];
+    /** Hook name hint from _debugHookTypes if available */
+    debugLabel?: string;
+}
+/**
+ * Information about a single effect (useEffect/useLayoutEffect/useInsertionEffect).
+ */
+interface EffectInfo {
+    /** Position in the effect circular list (0-based) */
+    index: number;
+    /** Corresponding hook index in the memoizedState list */
+    hookIndex: number;
+    /** Effect type derived from tag bitmask */
+    type: 'useEffect' | 'useLayoutEffect' | 'useInsertionEffect';
+    /** Current dependency array (null = no deps, runs every render) */
+    deps: SerializedValue[] | null;
+    /** Previous dependency array from fiber.alternate */
+    prevDeps: SerializedValue[] | null;
+    /** Indices of deps that changed (triggering this effect to run) */
+    changedDepIndices: number[];
+    /** Whether this effect will execute on this render */
+    willRun: boolean;
+    /** Whether the previous effect returned a cleanup function */
+    hasCleanup: boolean;
+}
+/**
+ * Component lifecycle event types for the timeline.
+ */
+type TimelineEventType = 'mount' | 'unmount' | 'render' | 'effect-run' | 'effect-cleanup' | 'state-update' | 'props-change';
+/**
+ * A single event in a component's lifecycle timeline.
+ */
+interface TimelineEvent {
+    type: TimelineEventType;
+    timestamp: number;
+    /** Render duration in ms (for render events) */
+    duration?: number;
+    /** Additional context (e.g., which hook, which prop) */
+    detail?: SerializedValue;
+}
+/**
+ * Console log levels captured by the console tracker.
+ */
+type ConsoleLevel = 'log' | 'warn' | 'error' | 'info' | 'debug';
+/**
+ * A captured console.log/warn/error/info/debug call with fiber attribution.
+ */
+interface ConsoleCaptureEntry {
+    /** Console method that was called */
+    level: ConsoleLevel;
+    /** Serialized arguments passed to console */
+    args: SerializedValue[];
+    /** When the console call occurred */
+    timestamp: number;
+    /** Component name if called during a React render */
+    componentName?: string;
+    /** Ancestor chain: ["App", "Dashboard", "Card"] */
+    ancestorChain?: string[];
+    /** Path-based node ID if attributable */
+    nodeId?: string;
+}
+interface RuntimeNodeHooksMessage {
+    type: 'runtime:nodeHooks';
+    nodeId: string;
+    hooks: HookInfo[];
+    timestamp: number;
+}
+interface RuntimeNodeEffectsMessage {
+    type: 'runtime:nodeEffects';
+    nodeId: string;
+    effects: EffectInfo[];
+    timestamp: number;
+}
+interface RuntimeDetailedRenderReasonMessage {
+    type: 'runtime:detailedRenderReason';
+    nodeId: string;
+    reason: DetailedRenderReason;
+    timestamp: number;
+}
+interface RuntimeTimelineEventMessage {
+    type: 'runtime:timelineEvent';
+    nodeId: string;
+    componentName: string;
+    event: TimelineEvent;
+}
+interface RuntimeConsoleCaptureMessage {
+    type: 'runtime:consoleCapture';
+    entries: ConsoleCaptureEntry[];
+    timestamp: number;
+}
+/**
  * Messages received from extension
  */
 type ExtensionToRuntimeMessage = {
@@ -177,6 +308,22 @@ type ExtensionToRuntimeMessage = {
     type: 'ext:stopTreeTracking';
 } | {
     type: 'ext:requestFullSnapshot';
+} | {
+    type: 'ext:requestNodeHooks';
+    nodeId: string;
+} | {
+    type: 'ext:requestNodeEffects';
+    nodeId: string;
+} | {
+    type: 'ext:requestDetailedRenderReason';
+    nodeId: string;
+} | {
+    type: 'ext:requestTimeline';
+    nodeId: string;
+} | {
+    type: 'ext:startConsoleCapture';
+} | {
+    type: 'ext:stopConsoleCapture';
 };
 interface TrackingOptions {
     trackAllRenders?: boolean;
@@ -448,6 +595,7 @@ interface Fiber {
     sibling: Fiber | null;
     return: Fiber | null;
     memoizedProps: Record<string, unknown> | null;
+    pendingProps: Record<string, unknown> | null;
     actualDuration?: number;
     alternate?: Fiber | null;
     stateNode?: unknown;
@@ -455,6 +603,59 @@ interface Fiber {
         fileName: string;
         lineNumber: number;
     } | null;
+    /** Hook state linked list head (useState, useRef, useMemo, etc.) */
+    memoizedState: FiberHookState | null;
+    /** Effect queue (useEffect, useLayoutEffect circular list) */
+    updateQueue: FiberUpdateQueue | null;
+    /** Fiber flags (for detecting force updates, etc.) */
+    flags: number;
+    /** Element type (used for context detection) */
+    elementType: unknown;
+    /** Context dependencies (React 18+) */
+    dependencies: FiberDependencies | null;
+    /** Debug hook types array (dev mode: ["useState", "useEffect", ...]) */
+    _debugHookTypes?: string[] | null;
+}
+/**
+ * Hook state linked list node from fiber.memoizedState.
+ * Each hook call creates one node in this linked list.
+ */
+interface FiberHookState {
+    memoizedState: unknown;
+    baseState: unknown;
+    baseQueue: unknown;
+    queue: {
+        pending: unknown;
+        lastRenderedReducer: ((...args: unknown[]) => unknown) | null;
+        lastRenderedState: unknown;
+        dispatch?: (...args: unknown[]) => void;
+    } | null;
+    next: FiberHookState | null;
+}
+/**
+ * Effect structure in the updateQueue circular linked list.
+ * Tag bitmask: HookHasEffect=0b0001, Insertion=0b0010, Layout=0b0100, Passive=0b1000
+ */
+interface FiberEffect {
+    tag: number;
+    create: (() => (() => void) | void) | null;
+    destroy: (() => void) | null;
+    deps: unknown[] | null;
+    next: FiberEffect | null;
+}
+interface FiberUpdateQueue {
+    lastEffect: FiberEffect | null;
+}
+interface FiberDependencies {
+    firstContext: FiberContextDependency | null;
+}
+interface FiberContextDependency {
+    context: {
+        _currentValue: unknown;
+        displayName?: string;
+    };
+    memoizedValue: unknown;
+    next: FiberContextDependency | null;
 }
 type FiberType = {
     name?: string;
@@ -504,9 +705,74 @@ declare function requestTreeSnapshot(): void;
  */
 declare function installFiberTreeWalker(): () => void;
 /**
+ * Get detailed render reason for a specific node by ID.
+ * Uses fiberRefMap to look up the cached fiber reference.
+ */
+declare function getDetailedRenderReason(nodeId: string): DetailedRenderReason | null;
+/**
+ * Get all hooks for a specific node by ID.
+ * Returns null if the node is not found (e.g., unmounted).
+ */
+declare function getNodeHooks(nodeId: string): HookInfo[] | null;
+/**
+ * Get all effects for a specific node by ID.
+ * Returns null if the node is not found (e.g., unmounted).
+ */
+declare function getNodeEffects(nodeId: string): EffectInfo[] | null;
+/**
+ * Get the fiberRefMap for external use (e.g., console tracker fiber attribution).
+ */
+declare function getFiberRefMap(): Map<string, Fiber>;
+/**
  * Uninstall the fiber tree walker, restoring the original hook.
  */
 declare function uninstallFiberTreeWalker(): void;
+
+/**
+ * Hook Inspector for @flotrace/runtime
+ *
+ * Walks fiber.memoizedState linked list, classifies each hook by type,
+ * and serializes values for display in FloTrace.
+ *
+ * Hook classification uses a combination of:
+ * 1. fiber._debugHookTypes (available in dev builds — most reliable)
+ * 2. Shape-based inference from memoizedState structure (fallback)
+ *
+ * Shape heuristics (from React internals):
+ * - useState/useReducer: queue !== null (has dispatch/reducer)
+ * - useRef: memoizedState is { current: <value> } with single key
+ * - useMemo/useCallback: memoizedState is [computedValue, deps]
+ * - useEffect/useLayoutEffect: matched against effect circular list via tag bitmask
+ */
+
+/**
+ * Inspect all hooks in a fiber's memoizedState linked list.
+ * Returns an array of HookInfo objects with type, value, and deps.
+ */
+declare function inspectHooks(fiber: Fiber): HookInfo[];
+
+/**
+ * Effect Dependency Tracker for @flotrace/runtime
+ *
+ * Walks fiber.updateQueue.lastEffect circular linked list to extract
+ * all effects (useEffect, useLayoutEffect, useInsertionEffect) with:
+ * - Current and previous dependency arrays
+ * - Which specific deps changed (triggering the effect)
+ * - Whether the effect will run on this render
+ * - Whether a cleanup function exists
+ *
+ * Effect tag bitmask (from React's HookFlags):
+ *   HookHasEffect  = 0b0001 (1)  — effect will execute
+ *   HookInsertion  = 0b0010 (2)  — useInsertionEffect
+ *   HookLayout     = 0b0100 (4)  — useLayoutEffect
+ *   HookPassive    = 0b1000 (8)  — useEffect
+ */
+
+/**
+ * Inspect all effects in a fiber's updateQueue.
+ * Compares current deps with previous (from fiber.alternate) to detect changes.
+ */
+declare function inspectEffects(fiber: Fiber): EffectInfo[];
 
 /**
  * Zustand Store Tracker for @flotrace/runtime
@@ -569,6 +835,65 @@ declare function installRouterTracker(wsClient: FloTraceWebSocketClient): void;
 declare function uninstallRouterTracker(): void;
 
 /**
+ * Component Event Timeline for @flotrace/runtime
+ *
+ * Emits lifecycle events (mount, unmount, render, effect-run, effect-cleanup,
+ * state-update, props-change) for each component. Events are stored in a
+ * ring buffer per component (max 100 events) to prevent memory growth.
+ *
+ * Events are batched and flushed every 500ms to avoid flooding the WebSocket.
+ */
+
+/**
+ * Install the timeline tracker.
+ * Call once during ext:startTracking.
+ */
+declare function installTimelineTracker(wsClient: FloTraceWebSocketClient): void;
+/**
+ * Uninstall the timeline tracker and clean up resources.
+ */
+declare function uninstallTimelineTracker(): void;
+/**
+ * Record a lifecycle event for a component.
+ * Called from the fiber tree walker during tree walks and from effect trackers.
+ *
+ * @param nodeId - Path-based node ID (e.g., "App-0/Dashboard-0/Card-2")
+ * @param componentName - Component display name
+ * @param eventType - Lifecycle event type
+ * @param detail - Optional additional context (serialized)
+ * @param duration - Optional duration in ms (for render events)
+ */
+declare function recordTimelineEvent(nodeId: string, componentName: string, eventType: TimelineEventType, detail?: unknown, duration?: number): void;
+/**
+ * Get the timeline for a specific component (for on-demand requests).
+ */
+declare function getTimeline(nodeId: string): TimelineEvent[];
+
+/**
+ * Console Capture for @flotrace/runtime
+ *
+ * Monkey-patches console.log/warn/error/info/debug to capture calls
+ * with React component attribution. Attempts to identify which component
+ * triggered the console call via React's internal current fiber tracking.
+ *
+ * Key design decisions:
+ * - Always calls the original console method first (preserves normal behavior)
+ * - Uses a batch buffer (max 50 entries, 500ms flush) to avoid flooding WebSocket
+ * - Fiber attribution via React's __SECRET_INTERNALS (works in dev mode)
+ * - Skips [FloTrace]-prefixed logs to avoid recursion
+ */
+
+/**
+ * Install the console tracker.
+ * Monkey-patches console methods to capture calls with component attribution.
+ */
+declare function installConsoleTracker(wsClient: FloTraceWebSocketClient): void;
+/**
+ * Uninstall the console tracker and restore original console methods.
+ */
+declare function uninstallConsoleTracker(): void;
+
+/**
  * Serialize a value for safe transmission over WebSocket.
  * Handles circular references, functions, symbols, and large values.
  */
@@ -578,4 +903,4 @@ declare function serializeValue(value: unknown, depth?: number, seen?: WeakSet<o
  */
 declare function serializeProps(props: Record<string, unknown>): Record<string, SerializedValue>;
 
-export { DEFAULT_CONFIG, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type LiveTreeNode, type ReduxStoreApi, type SerializedValue, type TrackingOptions, disposeWebSocketClient, getWebSocketClient, installFiberTreeWalker, installReduxTracker, installRouterTracker, installZustandTracker, isReduxStore, requestTreeSnapshot, serializeProps, serializeValue, uninstallFiberTreeWalker, uninstallReduxTracker, uninstallRouterTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };
+export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type PropChange, type ReduxStoreApi, type SerializedValue, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installReduxTracker, installRouterTracker, installTimelineTracker, installZustandTracker, isReduxStore, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallReduxTracker, uninstallRouterTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };

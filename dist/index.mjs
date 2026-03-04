@@ -426,6 +426,314 @@ function getChangedKeys(prev, next) {
   return changed;
 }
 
+// src/hookInspector.ts
+var HOOK_INSERTION = 2;
+var HOOK_LAYOUT = 4;
+var HOOK_PASSIVE = 8;
+function inspectHooks(fiber) {
+  const hooks = [];
+  let hookState = fiber.memoizedState;
+  const effects = collectEffectList(fiber);
+  let effectIndex = 0;
+  const debugTypes = fiber._debugHookTypes ?? null;
+  let index = 0;
+  while (hookState) {
+    try {
+      const debugLabel = debugTypes?.[index] ?? void 0;
+      const hookInfo = classifyHook(hookState, index, effects, effectIndex, debugLabel);
+      hooks.push(hookInfo);
+      if (hookInfo.type === "useEffect" || hookInfo.type === "useLayoutEffect" || hookInfo.type === "useInsertionEffect") {
+        effectIndex++;
+      }
+    } catch (error) {
+      hooks.push({ index, type: "unknown", value: { __type: "truncated", originalType: "error" } });
+    }
+    hookState = hookState.next;
+    index++;
+  }
+  return hooks;
+}
+function classifyHook(state, index, effects, effectIdx, debugLabel) {
+  const ms = state.memoizedState;
+  if (debugLabel) {
+    return classifyFromDebugLabel(state, index, effects, effectIdx, debugLabel);
+  }
+  if (state.queue !== null) {
+    const queue = state.queue;
+    const isReducer = queue.lastRenderedReducer && typeof queue.lastRenderedReducer === "function" && queue.lastRenderedReducer.name !== "" && queue.lastRenderedReducer.name !== "basicStateReducer";
+    return {
+      index,
+      type: isReducer ? "useReducer" : "useState",
+      value: serializeValue(ms, 0, /* @__PURE__ */ new WeakSet())
+    };
+  }
+  if (ms !== null && typeof ms === "object" && !Array.isArray(ms) && "current" in ms) {
+    const keys = Object.keys(ms);
+    if (keys.length === 1 && keys[0] === "current") {
+      return {
+        index,
+        type: "useRef",
+        value: serializeValue(ms.current, 0, /* @__PURE__ */ new WeakSet())
+      };
+    }
+  }
+  if (Array.isArray(ms) && ms.length === 2 && Array.isArray(ms[1])) {
+    const isCallback = typeof ms[0] === "function";
+    return {
+      index,
+      type: isCallback ? "useCallback" : "useMemo",
+      value: serializeValue(ms[0], 0, /* @__PURE__ */ new WeakSet()),
+      deps: ms[1].map((d) => serializeValue(d, 0, /* @__PURE__ */ new WeakSet()))
+    };
+  }
+  if (effectIdx < effects.length) {
+    const effect = effects[effectIdx];
+    if (typeof ms === "number" || isEffectShape(ms)) {
+      const type = (effect.tag & HOOK_PASSIVE) !== 0 ? "useEffect" : (effect.tag & HOOK_LAYOUT) !== 0 ? "useLayoutEffect" : (effect.tag & HOOK_INSERTION) !== 0 ? "useInsertionEffect" : "useEffect";
+      return {
+        index,
+        type,
+        value: { __type: "function", name: "effect" },
+        deps: effect.deps ? effect.deps.map((d) => serializeValue(d, 0, /* @__PURE__ */ new WeakSet())) : void 0
+      };
+    }
+  }
+  if (Array.isArray(ms) && ms.length === 2 && typeof ms[0] === "boolean" && typeof ms[1] === "function") {
+    return {
+      index,
+      type: "useTransition",
+      value: serializeValue(ms[0], 0, /* @__PURE__ */ new WeakSet())
+    };
+  }
+  if (typeof ms === "string" && ms.startsWith(":")) {
+    return {
+      index,
+      type: "useId",
+      value: ms
+    };
+  }
+  return { index, type: "unknown", value: serializeValue(ms, 0, /* @__PURE__ */ new WeakSet()) };
+}
+function classifyFromDebugLabel(state, index, effects, effectIdx, debugLabel) {
+  const ms = state.memoizedState;
+  const normalizedLabel = debugLabel.toLowerCase().replace(/\s/g, "");
+  const labelMap = {
+    "usestate": "useState",
+    "usereducer": "useReducer",
+    "useref": "useRef",
+    "usememo": "useMemo",
+    "usecallback": "useCallback",
+    "useeffect": "useEffect",
+    "uselayouteffect": "useLayoutEffect",
+    "useinsertioneffect": "useInsertionEffect",
+    "usecontext": "useContext",
+    "useimperativehandle": "useImperativeHandle",
+    "usedebugvalue": "useDebugValue",
+    "usetransition": "useTransition",
+    "usedeferredvalue": "useDeferredValue",
+    "useid": "useId",
+    "usesyncexternalstore": "useSyncExternalStore",
+    "useoptimistic": "useOptimistic",
+    "useformstatus": "useFormStatus"
+  };
+  const hookType = labelMap[normalizedLabel] ?? "unknown";
+  const base = { index, type: hookType, value: serializeValue(ms, 0, /* @__PURE__ */ new WeakSet()), debugLabel };
+  if (hookType === "useEffect" || hookType === "useLayoutEffect" || hookType === "useInsertionEffect") {
+    if (effectIdx < effects.length) {
+      const effect = effects[effectIdx];
+      base.value = { __type: "function", name: "effect" };
+      base.deps = effect.deps ? effect.deps.map((d) => serializeValue(d, 0, /* @__PURE__ */ new WeakSet())) : void 0;
+    }
+  }
+  if ((hookType === "useMemo" || hookType === "useCallback") && Array.isArray(ms) && ms.length === 2 && Array.isArray(ms[1])) {
+    base.value = serializeValue(ms[0], 0, /* @__PURE__ */ new WeakSet());
+    base.deps = ms[1].map((d) => serializeValue(d, 0, /* @__PURE__ */ new WeakSet()));
+  }
+  if (hookType === "useRef" && ms !== null && typeof ms === "object" && "current" in ms) {
+    base.value = serializeValue(ms.current, 0, /* @__PURE__ */ new WeakSet());
+  }
+  return base;
+}
+function isEffectShape(ms) {
+  if (ms === null || ms === void 0) return false;
+  if (typeof ms === "object" && ms !== null) {
+    const obj = ms;
+    return "tag" in obj && "create" in obj && "deps" in obj;
+  }
+  return false;
+}
+function collectEffectList(fiber) {
+  const effects = [];
+  const lastEffect = fiber.updateQueue?.lastEffect;
+  if (!lastEffect) return effects;
+  let effect = lastEffect.next;
+  if (!effect) return effects;
+  do {
+    effects.push(effect);
+    effect = effect.next;
+  } while (effect && effect !== lastEffect.next);
+  return effects;
+}
+
+// src/effectInspector.ts
+var HOOK_HAS_EFFECT = 1;
+var HOOK_INSERTION2 = 2;
+var HOOK_LAYOUT2 = 4;
+var HOOK_PASSIVE2 = 8;
+function inspectEffects(fiber) {
+  const results = [];
+  const lastEffect = fiber.updateQueue?.lastEffect;
+  if (!lastEffect) return results;
+  const currEffects = collectCircularList(lastEffect);
+  const prevEffects = fiber.alternate?.updateQueue?.lastEffect ? collectCircularList(fiber.alternate.updateQueue.lastEffect) : [];
+  const hookIndexMap = buildEffectToHookIndexMap(fiber, currEffects);
+  for (let i = 0; i < currEffects.length; i++) {
+    try {
+      const curr = currEffects[i];
+      const prev = prevEffects[i] ?? null;
+      const type = (curr.tag & HOOK_PASSIVE2) !== 0 ? "useEffect" : (curr.tag & HOOK_LAYOUT2) !== 0 ? "useLayoutEffect" : (curr.tag & HOOK_INSERTION2) !== 0 ? "useInsertionEffect" : "useEffect";
+      const willRun = (curr.tag & HOOK_HAS_EFFECT) !== 0;
+      const changedDepIndices = diffDeps(prev?.deps ?? null, curr.deps);
+      const hasCleanup = typeof curr.destroy === "function";
+      results.push({
+        index: i,
+        hookIndex: hookIndexMap.get(i) ?? -1,
+        type,
+        deps: serializeDeps(curr.deps),
+        prevDeps: prev ? serializeDeps(prev.deps) : null,
+        changedDepIndices,
+        willRun,
+        hasCleanup
+      });
+    } catch (error) {
+      results.push({
+        index: i,
+        hookIndex: -1,
+        type: "useEffect",
+        deps: null,
+        prevDeps: null,
+        changedDepIndices: [],
+        willRun: false,
+        hasCleanup: false
+      });
+    }
+  }
+  return results;
+}
+function collectCircularList(lastEffect) {
+  const list = [];
+  let effect = lastEffect.next;
+  if (!effect) return list;
+  do {
+    list.push(effect);
+    effect = effect.next;
+  } while (effect && effect !== lastEffect.next);
+  return list;
+}
+function buildEffectToHookIndexMap(fiber, effects) {
+  const map = /* @__PURE__ */ new Map();
+  let hookState = fiber.memoizedState;
+  let hookIndex = 0;
+  let effectIndex = 0;
+  while (hookState && effectIndex < effects.length) {
+    const ms = hookState.memoizedState;
+    if (isLikelyEffectHook(ms, hookState)) {
+      map.set(effectIndex, hookIndex);
+      effectIndex++;
+    }
+    hookState = hookState.next;
+    hookIndex++;
+  }
+  return map;
+}
+function isLikelyEffectHook(ms, state) {
+  if (state.queue !== null) return false;
+  if (ms !== null && typeof ms === "object") {
+    const obj = ms;
+    if ("tag" in obj && "create" in obj && "deps" in obj) return true;
+  }
+  return false;
+}
+function diffDeps(prev, curr) {
+  if (!prev || !curr) return [];
+  const changed = [];
+  const len = Math.max(prev.length, curr.length);
+  for (let i = 0; i < len; i++) {
+    if (!Object.is(prev[i], curr[i])) {
+      changed.push(i);
+    }
+  }
+  return changed;
+}
+function serializeDeps(deps) {
+  if (deps === null) return null;
+  return deps.map((d) => serializeValue(d, 0, /* @__PURE__ */ new WeakSet()));
+}
+
+// src/timelineTracker.ts
+var MAX_EVENTS_PER_COMPONENT = 100;
+var FLUSH_INTERVAL_MS = 500;
+var MAX_PENDING_EVENTS = 200;
+var timelines = /* @__PURE__ */ new Map();
+var pendingEvents = [];
+var client = null;
+var flushTimer = null;
+var isInstalled = false;
+function installTimelineTracker(wsClient) {
+  if (isInstalled) return;
+  client = wsClient;
+  isInstalled = true;
+  flushTimer = setInterval(flushPendingEvents, FLUSH_INTERVAL_MS);
+}
+function uninstallTimelineTracker() {
+  if (!isInstalled) return;
+  if (flushTimer) {
+    clearInterval(flushTimer);
+    flushTimer = null;
+  }
+  flushPendingEvents();
+  timelines.clear();
+  pendingEvents = [];
+  client = null;
+  isInstalled = false;
+}
+function recordTimelineEvent(nodeId, componentName, eventType, detail, duration) {
+  if (!isInstalled) return;
+  const event = {
+    type: eventType,
+    timestamp: Date.now(),
+    duration,
+    detail: detail !== void 0 ? serializeValue(detail, 0, /* @__PURE__ */ new WeakSet()) : void 0
+  };
+  let events = timelines.get(nodeId);
+  if (!events) {
+    events = [];
+    timelines.set(nodeId, events);
+  }
+  events.push(event);
+  if (events.length > MAX_EVENTS_PER_COMPONENT) {
+    events.shift();
+  }
+  if (pendingEvents.length < MAX_PENDING_EVENTS) {
+    pendingEvents.push({ nodeId, componentName, event });
+  }
+}
+function getTimeline(nodeId) {
+  return timelines.get(nodeId) ?? [];
+}
+function flushPendingEvents() {
+  if (!client?.connected || pendingEvents.length === 0) return;
+  for (const { nodeId, componentName, event } of pendingEvents) {
+    client.send({
+      type: "runtime:timelineEvent",
+      nodeId,
+      componentName,
+      event
+    });
+  }
+  pendingEvents = [];
+}
+
 // src/fiberTreeWalker.ts
 var FIBER_TAGS = {
   FunctionComponent: 0,
@@ -468,7 +776,7 @@ var DEBOUNCE_MS_LARGE = 1e3;
 var currentDebounceMs = DEBOUNCE_MS_SMALL;
 var isWalking = false;
 var originalOnCommitFiberRoot = null;
-var isInstalled = false;
+var isInstalled2 = false;
 var hookedRendererID = null;
 var activeStrategy = null;
 var fiberRefMap = /* @__PURE__ */ new Map();
@@ -544,6 +852,13 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
         fiberRefMap.set(nodeId, current);
         const renderPhase = current.alternate ? "update" : "mount";
         const renderReason = detectRenderReason(current, renderPhase);
+        recordTimelineEvent(
+          nodeId,
+          name,
+          renderPhase === "mount" ? "mount" : "render",
+          { reason: renderReason },
+          current.actualDuration
+        );
         const children = walkFiber(
           current.child,
           nodeId,
@@ -725,8 +1040,8 @@ function sendDebouncedSnapshot(root) {
       } else {
         currentDebounceMs = DEBOUNCE_MS_SMALL;
       }
-      const client2 = getWebSocketClient();
-      if (!client2.connected) {
+      const client4 = getWebSocketClient();
+      if (!client4.connected) {
         console.warn(
           "[FloTrace] WebSocket not connected, cannot send tree snapshot"
         );
@@ -745,7 +1060,7 @@ function sendDebouncedSnapshot(root) {
           "nextDebounce:",
           currentDebounceMs + "ms"
         );
-        client2.sendImmediate({
+        client4.sendImmediate({
           type: "runtime:treeSnapshot",
           tree,
           timestamp: Date.now()
@@ -764,7 +1079,7 @@ function sendDebouncedSnapshot(root) {
             "updated:",
             diff.updated.length
           );
-          client2.sendImmediate({
+          client4.sendImmediate({
             type: "runtime:treeDiff",
             seq: diffSeq,
             added: diff.added,
@@ -831,7 +1146,7 @@ function computeTreeDiff(prev, curr) {
   return { added, removed, updated };
 }
 function requestTreeSnapshot() {
-  if (!isInstalled) {
+  if (!isInstalled2) {
     return;
   }
   if (activeStrategy === "devtools") return;
@@ -846,7 +1161,7 @@ function requestFullSnapshot() {
   diffSeq = 0;
 }
 function installFiberTreeWalker() {
-  if (isInstalled) {
+  if (isInstalled2) {
     console.warn("[FloTrace] Fiber tree walker already installed");
     return () => uninstallFiberTreeWalker();
   }
@@ -857,7 +1172,7 @@ function installFiberTreeWalker() {
     return () => {
     };
   }
-  isInstalled = true;
+  isInstalled2 = true;
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (hook && typeof hook.onCommitFiberRoot === "function") {
     originalOnCommitFiberRoot = hook.onCommitFiberRoot;
@@ -922,8 +1237,108 @@ function getNodeProps(nodeId) {
     return null;
   }
 }
+function detectDetailedRenderReason(fiber) {
+  if (!fiber.alternate) return { type: "mount" };
+  const prev = fiber.alternate;
+  if (shallowPropsChanged(prev.memoizedProps, fiber.memoizedProps)) {
+    const changedProps = diffProps(prev.memoizedProps, fiber.memoizedProps);
+    return { type: "props-changed", changedProps };
+  }
+  const changedHookIndices = diffHookStates(prev.memoizedState, fiber.memoizedState);
+  if (changedHookIndices.length > 0) {
+    return { type: "state-changed", changedHookIndices };
+  }
+  const changedContexts = detectContextChanges(fiber);
+  if (changedContexts.length > 0) {
+    return { type: "context-changed", contextNames: changedContexts };
+  }
+  const parentName = fiber.return ? getComponentName(fiber.return) : void 0;
+  return { type: "parent-render", parentName };
+}
+function diffProps(prev, next) {
+  const changes = [];
+  if (!prev || !next) return changes;
+  const allKeys = /* @__PURE__ */ new Set([...Object.keys(prev), ...Object.keys(next)]);
+  for (const key of allKeys) {
+    if (key === "children") continue;
+    if (!Object.is(prev[key], next[key])) {
+      changes.push({
+        key,
+        prev: serializeValue(prev[key], 0, /* @__PURE__ */ new WeakSet()),
+        next: serializeValue(next[key], 0, /* @__PURE__ */ new WeakSet())
+      });
+    }
+  }
+  return changes;
+}
+function diffHookStates(prev, next) {
+  const changed = [];
+  let prevHook = prev;
+  let nextHook = next;
+  let index = 0;
+  while (prevHook && nextHook) {
+    if (prevHook.queue !== null || nextHook.queue !== null) {
+      if (!Object.is(prevHook.memoizedState, nextHook.memoizedState)) {
+        changed.push(index);
+      }
+    }
+    prevHook = prevHook.next;
+    nextHook = nextHook.next;
+    index++;
+  }
+  return changed;
+}
+function detectContextChanges(fiber) {
+  const changed = [];
+  if (!fiber.dependencies?.firstContext) return changed;
+  let ctx = fiber.dependencies.firstContext;
+  while (ctx) {
+    try {
+      if (!Object.is(ctx.memoizedValue, ctx.context._currentValue)) {
+        const name = ctx.context.displayName || "UnknownContext";
+        changed.push(name);
+      }
+    } catch {
+    }
+    ctx = ctx.next;
+  }
+  return changed;
+}
+function getDetailedRenderReason(nodeId) {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return detectDetailedRenderReason(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error detecting render reason for "${nodeId}":`, error);
+    return null;
+  }
+}
+function getNodeHooks(nodeId) {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return inspectHooks(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error inspecting hooks for node "${nodeId}":`, error);
+    return null;
+  }
+}
+function getNodeEffects(nodeId) {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return inspectEffects(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error inspecting effects for node "${nodeId}":`, error);
+    return null;
+  }
+}
+function getFiberRefMap() {
+  return fiberRefMap;
+}
 function uninstallFiberTreeWalker() {
-  if (!isInstalled) return;
+  if (!isInstalled2) return;
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
@@ -945,21 +1360,21 @@ function uninstallFiberTreeWalker() {
   previousFlatTree = null;
   snapshotCounter = 0;
   diffSeq = 0;
-  isInstalled = false;
+  isInstalled2 = false;
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }
 
 // src/zustandTracker.ts
 var activeUnsubscribers = [];
-var isInstalled2 = false;
+var isInstalled3 = false;
 var debounceTimers = /* @__PURE__ */ new Map();
 var DEBOUNCE_MS = 200;
-function installZustandTracker(stores, client2) {
-  if (isInstalled2) {
+function installZustandTracker(stores, client4) {
+  if (isInstalled3) {
     console.warn("[FloTrace] Zustand tracker already installed, reinstalling");
     uninstallZustandTracker();
   }
-  isInstalled2 = true;
+  isInstalled3 = true;
   console.log("[FloTrace] Installing Zustand tracker for stores:", Object.keys(stores));
   for (const [storeName, store] of Object.entries(stores)) {
     if (!store || typeof store !== "object" && typeof store !== "function" || typeof store.getState !== "function" || typeof store.subscribe !== "function") {
@@ -970,10 +1385,10 @@ function installZustandTracker(stores, client2) {
     }
     try {
       const initialState = store.getState();
-      sendStoreUpdate(storeName, initialState, Object.keys(initialState), client2);
+      sendStoreUpdate(storeName, initialState, Object.keys(initialState), client4);
       const unsubscribe = store.subscribe((newState, prevState) => {
         try {
-          scheduleStoreUpdate(storeName, prevState, newState, client2);
+          scheduleStoreUpdate(storeName, prevState, newState, client4);
         } catch (error) {
           console.error(`[FloTrace] Error in Zustand subscribe callback for "${storeName}":`, error);
         }
@@ -985,7 +1400,7 @@ function installZustandTracker(stores, client2) {
   }
 }
 function uninstallZustandTracker() {
-  if (!isInstalled2) return;
+  if (!isInstalled3) return;
   for (const timer of debounceTimers.values()) {
     clearTimeout(timer);
   }
@@ -998,10 +1413,10 @@ function uninstallZustandTracker() {
     }
   }
   activeUnsubscribers = [];
-  isInstalled2 = false;
+  isInstalled3 = false;
   console.log("[FloTrace] Zustand tracker uninstalled");
 }
-function scheduleStoreUpdate(storeName, prevState, newState, client2) {
+function scheduleStoreUpdate(storeName, prevState, newState, client4) {
   let changedKeys;
   try {
     changedKeys = getChangedKeys(prevState, newState);
@@ -1014,12 +1429,12 @@ function scheduleStoreUpdate(storeName, prevState, newState, client2) {
   if (existing) clearTimeout(existing);
   debounceTimers.set(storeName, setTimeout(() => {
     debounceTimers.delete(storeName);
-    sendStoreUpdate(storeName, newState, changedKeys, client2);
+    sendStoreUpdate(storeName, newState, changedKeys, client4);
   }, DEBOUNCE_MS));
 }
-function sendStoreUpdate(storeName, state, changedKeys, client2) {
+function sendStoreUpdate(storeName, state, changedKeys, client4) {
   try {
-    if (!client2.connected) return;
+    if (!client4.connected) return;
     const serializedState = {};
     for (const [key, value] of Object.entries(state)) {
       try {
@@ -1029,7 +1444,7 @@ function sendStoreUpdate(storeName, state, changedKeys, client2) {
         serializedState[key] = { __type: "error", value: "Serialization failed" };
       }
     }
-    client2.sendImmediate({
+    client4.sendImmediate({
       type: "runtime:zustand",
       storeName,
       state: serializedState,
@@ -1043,39 +1458,39 @@ function sendStoreUpdate(storeName, state, changedKeys, client2) {
 
 // src/reduxTracker.ts
 var activeUnsubscribe = null;
-var isInstalled3 = false;
+var isInstalled4 = false;
 var debounceTimer2 = null;
 var previousState = null;
 var DEBOUNCE_MS2 = 200;
 function isReduxStore(obj) {
   return typeof obj === "object" && obj !== null && typeof obj.getState === "function" && typeof obj.subscribe === "function" && typeof obj.dispatch === "function";
 }
-function installReduxTracker(store, client2) {
-  if (isInstalled3) {
+function installReduxTracker(store, client4) {
+  if (isInstalled4) {
     console.warn("[FloTrace] Redux tracker already installed, reinstalling");
     uninstallReduxTracker();
   }
-  isInstalled3 = true;
+  isInstalled4 = true;
   console.log("[FloTrace] Installing Redux tracker");
   try {
     const initialState = store.getState();
     previousState = initialState;
-    sendReduxUpdate(initialState, Object.keys(initialState), client2);
+    sendReduxUpdate(initialState, Object.keys(initialState), client4);
     activeUnsubscribe = store.subscribe(() => {
       try {
         const newState = store.getState();
-        scheduleReduxUpdate(newState, client2);
+        scheduleReduxUpdate(newState, client4);
       } catch (error) {
         console.error("[FloTrace] Error in Redux subscribe callback:", error);
       }
     });
   } catch (error) {
     console.error("[FloTrace] Failed to install Redux tracker:", error);
-    isInstalled3 = false;
+    isInstalled4 = false;
   }
 }
 function uninstallReduxTracker() {
-  if (!isInstalled3) return;
+  if (!isInstalled4) return;
   if (debounceTimer2) {
     clearTimeout(debounceTimer2);
     debounceTimer2 = null;
@@ -1089,10 +1504,10 @@ function uninstallReduxTracker() {
     activeUnsubscribe = null;
   }
   previousState = null;
-  isInstalled3 = false;
+  isInstalled4 = false;
   console.log("[FloTrace] Redux tracker uninstalled");
 }
-function scheduleReduxUpdate(newState, client2) {
+function scheduleReduxUpdate(newState, client4) {
   let changedKeys;
   try {
     changedKeys = getChangedKeys(previousState ?? {}, newState);
@@ -1105,12 +1520,12 @@ function scheduleReduxUpdate(newState, client2) {
   if (debounceTimer2) clearTimeout(debounceTimer2);
   debounceTimer2 = setTimeout(() => {
     debounceTimer2 = null;
-    sendReduxUpdate(newState, changedKeys, client2);
+    sendReduxUpdate(newState, changedKeys, client4);
   }, DEBOUNCE_MS2);
 }
-function sendReduxUpdate(state, changedKeys, client2) {
+function sendReduxUpdate(state, changedKeys, client4) {
   try {
-    if (!client2.connected) return;
+    if (!client4.connected) return;
     const serializedState = {};
     for (const [key, value] of Object.entries(state)) {
       try {
@@ -1120,7 +1535,7 @@ function sendReduxUpdate(state, changedKeys, client2) {
         serializedState[key] = { __type: "error", value: "Serialization failed" };
       }
     }
-    client2.sendImmediate({
+    client4.sendImmediate({
       type: "runtime:redux",
       state: serializedState,
       changedKeys,
@@ -1132,15 +1547,15 @@ function sendReduxUpdate(state, changedKeys, client2) {
 }
 
 // src/routerTracker.ts
-var isInstalled4 = false;
+var isInstalled5 = false;
 var debounceTimer3 = null;
-var client = null;
+var client2 = null;
 var originalPushState = null;
 var originalReplaceState = null;
 var popstateHandler = null;
 var DEBOUNCE_MS3 = 200;
 function installRouterTracker(wsClient) {
-  if (isInstalled4) {
+  if (isInstalled5) {
     console.warn("[FloTrace] Router tracker already installed, reinstalling");
     uninstallRouterTracker();
   }
@@ -1150,8 +1565,8 @@ function installRouterTracker(wsClient) {
   }
   console.log("[FloTrace] Installing router tracker");
   try {
-    isInstalled4 = true;
-    client = wsClient;
+    isInstalled5 = true;
+    client2 = wsClient;
     originalPushState = history.pushState.bind(history);
     originalReplaceState = history.replaceState.bind(history);
     history.pushState = function(data, unused, url) {
@@ -1188,7 +1603,7 @@ function installRouterTracker(wsClient) {
   }
 }
 function uninstallRouterTracker() {
-  if (!isInstalled4) return;
+  if (!isInstalled5) return;
   if (debounceTimer3) {
     clearTimeout(debounceTimer3);
     debounceTimer3 = null;
@@ -1217,8 +1632,8 @@ function uninstallRouterTracker() {
   } catch (error) {
     console.error("[FloTrace] Error removing popstate listener:", error);
   }
-  client = null;
-  isInstalled4 = false;
+  client2 = null;
+  isInstalled5 = false;
   console.log("[FloTrace] Router tracker uninstalled");
 }
 function scheduleRouterUpdate() {
@@ -1230,14 +1645,14 @@ function scheduleRouterUpdate() {
 }
 function sendRouterUpdate() {
   try {
-    if (!client?.connected) return;
+    if (!client2?.connected) return;
     const pathname = window.location.pathname;
     const searchParams = {};
     const urlSearchParams = new URLSearchParams(window.location.search);
     for (const [key, value] of urlSearchParams.entries()) {
       searchParams[key] = value;
     }
-    client.sendImmediate({
+    client2.sendImmediate({
       type: "runtime:router",
       pathname,
       // Matched route params (e.g., :id) are not available from the History API.
@@ -1249,6 +1664,125 @@ function sendRouterUpdate() {
   } catch (error) {
     console.error("[FloTrace] Error sending router update:", error);
   }
+}
+
+// src/consoleTracker.ts
+var METHODS = ["log", "warn", "error", "info", "debug"];
+var MAX_BATCH_SIZE = 50;
+var FLUSH_INTERVAL_MS2 = 500;
+var MAX_ARGS_PER_ENTRY = 10;
+var MAX_BUFFER_SIZE = 300;
+var originals = /* @__PURE__ */ new Map();
+var client3 = null;
+var isInstalled6 = false;
+var buffer = [];
+var flushTimer2 = null;
+function installConsoleTracker(wsClient) {
+  if (isInstalled6) return;
+  client3 = wsClient;
+  isInstalled6 = true;
+  for (const method of METHODS) {
+    originals.set(method, console[method].bind(console));
+    console[method] = (...args) => {
+      originals.get(method)(...args);
+      captureEntry(method, args);
+    };
+  }
+  flushTimer2 = setInterval(flushBuffer, FLUSH_INTERVAL_MS2);
+}
+function uninstallConsoleTracker() {
+  if (!isInstalled6) return;
+  for (const [method, original] of originals) {
+    console[method] = original;
+  }
+  originals.clear();
+  if (flushTimer2) {
+    clearInterval(flushTimer2);
+    flushTimer2 = null;
+  }
+  flushBuffer();
+  buffer = [];
+  client3 = null;
+  isInstalled6 = false;
+}
+function captureEntry(level, args) {
+  if (args.length > 0 && typeof args[0] === "string" && args[0].startsWith("[FloTrace]")) {
+    return;
+  }
+  const attribution = getCurrentFiberAttribution();
+  const entry = {
+    level,
+    args: args.slice(0, MAX_ARGS_PER_ENTRY).map((a) => {
+      try {
+        return serializeValue(a, 0, /* @__PURE__ */ new WeakSet());
+      } catch {
+        return { __type: "truncated", originalType: typeof a };
+      }
+    }),
+    timestamp: Date.now(),
+    ...attribution
+  };
+  buffer.push(entry);
+  if (buffer.length > MAX_BUFFER_SIZE) {
+    buffer = buffer.slice(-MAX_BATCH_SIZE);
+  }
+  if (buffer.length >= MAX_BATCH_SIZE) {
+    flushBuffer();
+  }
+}
+function getCurrentFiberAttribution() {
+  try {
+    const internals = window.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+    const currentFiber = internals?.ReactCurrentOwner?.current;
+    if (!currentFiber) return {};
+    const componentName = getComponentNameFromFiber(currentFiber);
+    const ancestorChain = buildAncestorChain(currentFiber);
+    return {
+      componentName: componentName || void 0,
+      ancestorChain: ancestorChain.length > 0 ? ancestorChain : void 0
+    };
+  } catch {
+    return {};
+  }
+}
+function getComponentNameFromFiber(fiber) {
+  const type = fiber.type;
+  if (!type) return null;
+  if (typeof type === "function") {
+    return type.displayName || type.name || null;
+  }
+  if (typeof type === "object" && type !== null) {
+    if (type.type) {
+      return type.type.displayName || type.type.name || null;
+    }
+    if (type.render) {
+      return type.render.displayName || type.render.name || null;
+    }
+    return type.displayName || type.name || null;
+  }
+  return null;
+}
+function buildAncestorChain(fiber) {
+  const chain = [];
+  let current = fiber;
+  const maxDepth = 10;
+  while (current && chain.length < maxDepth) {
+    const name = getComponentNameFromFiber(current);
+    if (name) {
+      chain.unshift(name);
+    }
+    current = current.return;
+  }
+  return chain;
+}
+function flushBuffer() {
+  if (buffer.length === 0 || !client3?.connected) return;
+  client3.send({
+    type: "runtime:consoleCapture",
+    entries: [...buffer],
+    timestamp: Date.now()
+  });
+  buffer = [];
 }
 
 // src/FloTraceProvider.tsx
@@ -1274,38 +1808,43 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
       clearTimeout(pendingCleanupTimer);
       pendingCleanupTimer = null;
     }
-    const client2 = getWebSocketClient(mergedConfig);
-    const unsubConnection = client2.onConnectionChange((isConnected) => {
+    const client4 = getWebSocketClient(mergedConfig);
+    const unsubConnection = client4.onConnectionChange((isConnected) => {
       setConnected(isConnected);
     });
-    const unsubMessage = client2.onMessage((message) => {
+    const unsubMessage = client4.onMessage((message) => {
       try {
         switch (message.type) {
           case "ext:ping":
-            client2.sendImmediate({ type: "runtime:ready", appName: mergedConfig.appName });
+            client4.sendImmediate({ type: "runtime:ready", appName: mergedConfig.appName });
             break;
           case "ext:startTracking":
             trackingOptionsRef.current = message.options || {};
             if (message.options?.trackZustand && storesRef.current && Object.keys(storesRef.current).length > 0) {
               try {
-                installZustandTracker(storesRef.current, client2);
+                installZustandTracker(storesRef.current, client4);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Zustand tracker:", error);
               }
             }
             if (message.options?.trackRedux && reduxStoreRef.current) {
               try {
-                installReduxTracker(reduxStoreRef.current, client2);
+                installReduxTracker(reduxStoreRef.current, client4);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Redux tracker:", error);
               }
             }
             if (message.options?.trackRouter) {
               try {
-                installRouterTracker(client2);
+                installRouterTracker(client4);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Router tracker:", error);
               }
+            }
+            try {
+              installTimelineTracker(client4);
+            } catch (error) {
+              console.error("[FloTrace] Failed to install Timeline tracker:", error);
             }
             console.log("[FloTrace] Tracking started with options:", message.options);
             break;
@@ -1326,6 +1865,16 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
             } catch (e) {
               console.error("[FloTrace] Error uninstalling Router tracker:", e);
             }
+            try {
+              uninstallTimelineTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error uninstalling Timeline tracker:", e);
+            }
+            try {
+              uninstallConsoleTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error uninstalling Console tracker:", e);
+            }
             console.log("[FloTrace] Tracking stopped");
             break;
           case "ext:startTreeTracking":
@@ -1340,7 +1889,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
             const nodeId = message.nodeId;
             if (nodeId) {
               const props = getNodeProps(nodeId);
-              client2.sendImmediate({
+              client4.sendImmediate({
                 type: "runtime:nodeProps",
                 nodeId,
                 props: props || {},
@@ -1349,9 +1898,82 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
             }
             break;
           }
+          case "ext:requestNodeHooks": {
+            const hookNodeId = message.nodeId;
+            if (hookNodeId) {
+              const hooks = getNodeHooks(hookNodeId);
+              client4.sendImmediate({
+                type: "runtime:nodeHooks",
+                nodeId: hookNodeId,
+                hooks: hooks || [],
+                timestamp: Date.now()
+              });
+            }
+            break;
+          }
+          case "ext:requestNodeEffects": {
+            const effectNodeId = message.nodeId;
+            if (effectNodeId) {
+              const effects = getNodeEffects(effectNodeId);
+              client4.sendImmediate({
+                type: "runtime:nodeEffects",
+                nodeId: effectNodeId,
+                effects: effects || [],
+                timestamp: Date.now()
+              });
+            }
+            break;
+          }
+          case "ext:requestDetailedRenderReason": {
+            const reasonNodeId = message.nodeId;
+            if (reasonNodeId) {
+              const reason = getDetailedRenderReason(reasonNodeId);
+              if (reason) {
+                client4.sendImmediate({
+                  type: "runtime:detailedRenderReason",
+                  nodeId: reasonNodeId,
+                  reason,
+                  timestamp: Date.now()
+                });
+              }
+            }
+            break;
+          }
           case "ext:requestFullSnapshot":
             requestFullSnapshot();
             console.log("[FloTrace] Full snapshot requested by extension");
+            break;
+          case "ext:requestTimeline": {
+            const timelineNodeId = message.nodeId;
+            if (timelineNodeId) {
+              const events = getTimeline(timelineNodeId);
+              const componentName = timelineNodeId.split("/").pop()?.replace(/-\d+$/, "") ?? "Unknown";
+              for (const event of events) {
+                client4.sendImmediate({
+                  type: "runtime:timelineEvent",
+                  nodeId: timelineNodeId,
+                  componentName,
+                  event
+                });
+              }
+            }
+            break;
+          }
+          case "ext:startConsoleCapture":
+            try {
+              installConsoleTracker(client4);
+              console.log("[FloTrace] Console capture started");
+            } catch (error) {
+              console.error("[FloTrace] Failed to install Console tracker:", error);
+            }
+            break;
+          case "ext:stopConsoleCapture":
+            try {
+              uninstallConsoleTracker();
+              console.log("[FloTrace] Console capture stopped");
+            } catch (error) {
+              console.error("[FloTrace] Error stopping Console tracker:", error);
+            }
             break;
           case "ext:requestState":
             break;
@@ -1360,7 +1982,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
         console.error(`[FloTrace] Error handling message type "${message.type}":`, error);
       }
     });
-    client2.connect();
+    client4.connect();
     return () => {
       unsubConnection();
       unsubMessage();
@@ -1387,6 +2009,16 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
           console.error("[FloTrace] Error during cleanup (routerTracker):", e);
         }
         try {
+          uninstallTimelineTracker();
+        } catch (e) {
+          console.error("[FloTrace] Error during cleanup (timelineTracker):", e);
+        }
+        try {
+          uninstallConsoleTracker();
+        } catch (e) {
+          console.error("[FloTrace] Error during cleanup (consoleTracker):", e);
+        }
+        try {
           disposeWebSocketClient();
         } catch (e) {
           console.error("[FloTrace] Error during cleanup (websocketClient):", e);
@@ -1399,12 +2031,12 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
       if (!mergedConfig.enabled) {
         return;
       }
-      const client2 = getWebSocketClient();
-      if (!client2.connected) {
+      const client4 = getWebSocketClient();
+      if (!client4.connected) {
         return;
       }
       const normalizedPhase = phase === "nested-update" ? "update" : phase;
-      client2.send({
+      client4.send({
         type: "runtime:render",
         componentName: id,
         phase: normalizedPhase,
@@ -1433,12 +2065,12 @@ function withFloTrace(Component, displayName) {
         if (!floTrace?.enabled) {
           return;
         }
-        const client2 = getWebSocketClient();
-        if (!client2.connected) {
+        const client4 = getWebSocketClient();
+        if (!client4.connected) {
           return;
         }
         const normalizedPhase = phase === "nested-update" ? "update" : phase;
-        client2.send({
+        client4.send({
           type: "runtime:render",
           componentName: id,
           phase: normalizedPhase,
@@ -1447,7 +2079,7 @@ function withFloTrace(Component, displayName) {
           timestamp: commitTime
         });
         if (floTrace.config.includeProps) {
-          client2.send({
+          client4.send({
             type: "runtime:props",
             componentName: id,
             props: serializeProps(props),
@@ -1471,13 +2103,13 @@ function useTrackProps(componentName, props) {
       if (!floTrace?.enabled || !floTrace.config.includeProps) {
         return;
       }
-      const client2 = getWebSocketClient();
-      if (!client2.connected) {
+      const client4 = getWebSocketClient();
+      if (!client4.connected) {
         return;
       }
       const changedKeys = getChangedKeys(prevPropsRef.current, props);
       if (changedKeys.length > 0) {
-        client2.send({
+        client4.send({
           type: "runtime:props",
           componentName,
           props: serializeProps(props),
@@ -1497,18 +2129,30 @@ export {
   FloTraceProvider,
   FloTraceWebSocketClient,
   disposeWebSocketClient,
+  getDetailedRenderReason,
+  getFiberRefMap,
+  getNodeEffects,
+  getNodeHooks,
+  getTimeline,
   getWebSocketClient,
+  inspectEffects,
+  inspectHooks,
+  installConsoleTracker,
   installFiberTreeWalker,
   installReduxTracker,
   installRouterTracker,
+  installTimelineTracker,
   installZustandTracker,
   isReduxStore,
+  recordTimelineEvent,
   requestTreeSnapshot,
   serializeProps,
   serializeValue,
+  uninstallConsoleTracker,
   uninstallFiberTreeWalker,
   uninstallReduxTracker,
   uninstallRouterTracker,
+  uninstallTimelineTracker,
   uninstallZustandTracker,
   useFloTrace,
   useTrackProps,

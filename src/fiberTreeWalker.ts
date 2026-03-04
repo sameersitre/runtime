@@ -12,9 +12,12 @@
  * from the Profiler's onRender callback - so tree walks happen after each React commit.
  */
 
-import type { LiveTreeNode, RuntimeTreeDiffMessage, SerializedValue } from "./types";
-import { serializeProps } from "./serializer";
+import type { LiveTreeNode, RuntimeTreeDiffMessage, SerializedValue, DetailedRenderReason, PropChange, HookInfo, EffectInfo } from "./types";
+import { serializeValue, serializeProps } from "./serializer";
 import { getWebSocketClient } from "./websocketClient";
+import { inspectHooks } from "./hookInspector";
+import { inspectEffects } from "./effectInspector";
+import { recordTimelineEvent } from "./timelineTracker";
 export type { SerializedValue };
 
 // React fiber tag constants (from React source: ReactWorkTags.js)
@@ -50,17 +53,73 @@ const USER_COMPONENT_TAGS: Set<number> = new Set([
  * Minimal fiber type - only the fields we access.
  * React fibers are internal, so we type just what we use.
  */
-interface Fiber {
+export interface Fiber {
   tag: number;
   type: FiberType | null;
   child: Fiber | null;
   sibling: Fiber | null;
   return: Fiber | null;
   memoizedProps: Record<string, unknown> | null;
+  pendingProps: Record<string, unknown> | null;
   actualDuration?: number;
   alternate?: Fiber | null;
   stateNode?: unknown;
   _debugSource?: { fileName: string; lineNumber: number } | null;
+  /** Hook state linked list head (useState, useRef, useMemo, etc.) */
+  memoizedState: FiberHookState | null;
+  /** Effect queue (useEffect, useLayoutEffect circular list) */
+  updateQueue: FiberUpdateQueue | null;
+  /** Fiber flags (for detecting force updates, etc.) */
+  flags: number;
+  /** Element type (used for context detection) */
+  elementType: unknown;
+  /** Context dependencies (React 18+) */
+  dependencies: FiberDependencies | null;
+  /** Debug hook types array (dev mode: ["useState", "useEffect", ...]) */
+  _debugHookTypes?: string[] | null;
+}
+
+/**
+ * Hook state linked list node from fiber.memoizedState.
+ * Each hook call creates one node in this linked list.
+ */
+export interface FiberHookState {
+  memoizedState: unknown;
+  baseState: unknown;
+  baseQueue: unknown;
+  queue: {
+    pending: unknown;
+    lastRenderedReducer: ((...args: unknown[]) => unknown) | null;
+    lastRenderedState: unknown;
+    dispatch?: (...args: unknown[]) => void;
+  } | null;
+  next: FiberHookState | null;
+}
+
+/**
+ * Effect structure in the updateQueue circular linked list.
+ * Tag bitmask: HookHasEffect=0b0001, Insertion=0b0010, Layout=0b0100, Passive=0b1000
+ */
+export interface FiberEffect {
+  tag: number;
+  create: (() => (() => void) | void) | null;
+  destroy: (() => void) | null;
+  deps: unknown[] | null;
+  next: FiberEffect | null;
+}
+
+interface FiberUpdateQueue {
+  lastEffect: FiberEffect | null;
+}
+
+interface FiberDependencies {
+  firstContext: FiberContextDependency | null;
+}
+
+interface FiberContextDependency {
+  context: { _currentValue: unknown; displayName?: string };
+  memoizedValue: unknown;
+  next: FiberContextDependency | null;
 }
 
 type FiberType = {
@@ -298,6 +357,16 @@ function walkFiber(
           ? "update"
           : "mount";
         const renderReason = detectRenderReason(current, renderPhase);
+
+        // Record timeline event for this component
+        recordTimelineEvent(
+          nodeId,
+          name,
+          renderPhase === 'mount' ? 'mount' : 'render',
+          { reason: renderReason },
+          current.actualDuration,
+        );
+
         // Children of a user component start with a fresh nameCountMap (new parent level)
         // Increment depth for user component nesting
         const children = walkFiber(
@@ -887,6 +956,172 @@ export function getNodeProps(nodeId: string): Record<string, SerializedValue> | 
     console.error(`[FloTrace] Error serializing props for node "${nodeId}":`, error);
     return null;
   }
+}
+
+// ============================================================================
+// Console-Free Debugging: Enhanced Render Reason, Hook/Effect Inspection
+// ============================================================================
+
+/**
+ * Enhanced render reason with specific prop/state/context changes.
+ * Called on-demand (not during tree walk) to avoid performance overhead.
+ */
+export function detectDetailedRenderReason(fiber: Fiber): DetailedRenderReason {
+  if (!fiber.alternate) return { type: 'mount' };
+
+  const prev = fiber.alternate;
+
+  // 1. Check props changes with prev/next values
+  if (shallowPropsChanged(prev.memoizedProps, fiber.memoizedProps)) {
+    const changedProps = diffProps(prev.memoizedProps, fiber.memoizedProps);
+    return { type: 'props-changed', changedProps };
+  }
+
+  // 2. Check state hooks by walking memoizedState linked list
+  const changedHookIndices = diffHookStates(prev.memoizedState, fiber.memoizedState);
+  if (changedHookIndices.length > 0) {
+    return { type: 'state-changed', changedHookIndices };
+  }
+
+  // 3. Check context dependencies
+  const changedContexts = detectContextChanges(fiber);
+  if (changedContexts.length > 0) {
+    return { type: 'context-changed', contextNames: changedContexts };
+  }
+
+  // 4. Parent render fallback
+  const parentName = fiber.return ? getComponentName(fiber.return) : undefined;
+  return { type: 'parent-render', parentName };
+}
+
+/**
+ * Diff two props objects and return the specific keys that changed with values.
+ */
+function diffProps(
+  prev: Record<string, unknown> | null,
+  next: Record<string, unknown> | null,
+): PropChange[] {
+  const changes: PropChange[] = [];
+  if (!prev || !next) return changes;
+
+  const allKeys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+  for (const key of allKeys) {
+    if (key === 'children') continue;
+    if (!Object.is(prev[key], next[key])) {
+      changes.push({
+        key,
+        prev: serializeValue(prev[key], 0, new WeakSet()),
+        next: serializeValue(next[key], 0, new WeakSet()),
+      });
+    }
+  }
+  return changes;
+}
+
+/**
+ * Walk two memoizedState linked lists in parallel, comparing by reference.
+ * Returns indices of hooks whose memoizedState changed.
+ */
+function diffHookStates(
+  prev: FiberHookState | null,
+  next: FiberHookState | null,
+): number[] {
+  const changed: number[] = [];
+  let prevHook = prev;
+  let nextHook = next;
+  let index = 0;
+
+  while (prevHook && nextHook) {
+    // Only compare hooks that have a queue (state hooks: useState, useReducer)
+    // Skip effect/memo/ref hooks since their memoizedState changes don't mean "state update"
+    if (prevHook.queue !== null || nextHook.queue !== null) {
+      if (!Object.is(prevHook.memoizedState, nextHook.memoizedState)) {
+        changed.push(index);
+      }
+    }
+    prevHook = prevHook.next;
+    nextHook = nextHook.next;
+    index++;
+  }
+
+  return changed;
+}
+
+/**
+ * Detect context changes by examining fiber.dependencies.
+ * React 18+ stores context dependencies as a linked list.
+ */
+function detectContextChanges(fiber: Fiber): string[] {
+  const changed: string[] = [];
+  if (!fiber.dependencies?.firstContext) return changed;
+
+  let ctx: FiberContextDependency | null = fiber.dependencies.firstContext;
+  while (ctx) {
+    try {
+      // Compare memoized value (from last render) with current context value
+      if (!Object.is(ctx.memoizedValue, ctx.context._currentValue)) {
+        const name = ctx.context.displayName || 'UnknownContext';
+        changed.push(name);
+      }
+    } catch {
+      // Skip if context access fails
+    }
+    ctx = ctx.next;
+  }
+
+  return changed;
+}
+
+/**
+ * Get detailed render reason for a specific node by ID.
+ * Uses fiberRefMap to look up the cached fiber reference.
+ */
+export function getDetailedRenderReason(nodeId: string): DetailedRenderReason | null {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return detectDetailedRenderReason(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error detecting render reason for "${nodeId}":`, error);
+    return null;
+  }
+}
+
+/**
+ * Get all hooks for a specific node by ID.
+ * Returns null if the node is not found (e.g., unmounted).
+ */
+export function getNodeHooks(nodeId: string): HookInfo[] | null {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return inspectHooks(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error inspecting hooks for node "${nodeId}":`, error);
+    return null;
+  }
+}
+
+/**
+ * Get all effects for a specific node by ID.
+ * Returns null if the node is not found (e.g., unmounted).
+ */
+export function getNodeEffects(nodeId: string): EffectInfo[] | null {
+  const fiber = fiberRefMap.get(nodeId);
+  if (!fiber) return null;
+  try {
+    return inspectEffects(fiber);
+  } catch (error) {
+    console.error(`[FloTrace] Error inspecting effects for node "${nodeId}":`, error);
+    return null;
+  }
+}
+
+/**
+ * Get the fiberRefMap for external use (e.g., console tracker fiber attribution).
+ */
+export function getFiberRefMap(): Map<string, Fiber> {
+  return fiberRefMap;
 }
 
 /**

@@ -34,7 +34,12 @@ export type RuntimeMessage =
   | RuntimeContextUpdateMessage
   | RuntimeDisconnectMessage
   | RuntimeTreeSnapshotMessage
-  | RuntimeTreeDiffMessage;
+  | RuntimeTreeDiffMessage
+  | RuntimeNodeHooksMessage
+  | RuntimeNodeEffectsMessage
+  | RuntimeDetailedRenderReasonMessage
+  | RuntimeTimelineEventMessage
+  | RuntimeConsoleCaptureMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -176,6 +181,181 @@ export interface LiveTreeNode {
   renderReason?: 'mount' | 'props-changed' | 'state-or-context' | 'parent';
 }
 
+// ============================================================================
+// Console-Free Debugging Types
+// ============================================================================
+
+/**
+ * Enhanced render reason with specific prop/state/context changes.
+ */
+export type DetailedRenderReasonType =
+  | 'mount'
+  | 'props-changed'
+  | 'state-changed'
+  | 'context-changed'
+  | 'parent-render'
+  | 'force-update';
+
+export interface PropChange {
+  key: string;
+  prev: SerializedValue;
+  next: SerializedValue;
+}
+
+export type DetailedRenderReason =
+  | { type: 'mount' }
+  | { type: 'props-changed'; changedProps: PropChange[] }
+  | { type: 'state-changed'; changedHookIndices: number[] }
+  | { type: 'context-changed'; contextNames: string[] }
+  | { type: 'parent-render'; parentName?: string }
+  | { type: 'force-update' };
+
+/**
+ * Hook type classification — inferred from fiber.memoizedState shape.
+ */
+export type HookType =
+  | 'useState'
+  | 'useReducer'
+  | 'useRef'
+  | 'useMemo'
+  | 'useCallback'
+  | 'useEffect'
+  | 'useLayoutEffect'
+  | 'useInsertionEffect'
+  | 'useContext'
+  | 'useImperativeHandle'
+  | 'useDebugValue'
+  | 'useTransition'
+  | 'useDeferredValue'
+  | 'useId'
+  | 'useSyncExternalStore'
+  | 'useOptimistic'
+  | 'useFormStatus'
+  | 'unknown';
+
+/**
+ * Information about a single hook in a component's hook linked list.
+ */
+export interface HookInfo {
+  /** Position in the hook linked list (0-based) */
+  index: number;
+  /** Classified hook type */
+  type: HookType;
+  /** Serialized current value (state for useState, ref.current for useRef, etc.) */
+  value: SerializedValue;
+  /** For useMemo/useCallback/useEffect: serialized dependency array */
+  deps?: SerializedValue[];
+  /** Hook name hint from _debugHookTypes if available */
+  debugLabel?: string;
+}
+
+/**
+ * Information about a single effect (useEffect/useLayoutEffect/useInsertionEffect).
+ */
+export interface EffectInfo {
+  /** Position in the effect circular list (0-based) */
+  index: number;
+  /** Corresponding hook index in the memoizedState list */
+  hookIndex: number;
+  /** Effect type derived from tag bitmask */
+  type: 'useEffect' | 'useLayoutEffect' | 'useInsertionEffect';
+  /** Current dependency array (null = no deps, runs every render) */
+  deps: SerializedValue[] | null;
+  /** Previous dependency array from fiber.alternate */
+  prevDeps: SerializedValue[] | null;
+  /** Indices of deps that changed (triggering this effect to run) */
+  changedDepIndices: number[];
+  /** Whether this effect will execute on this render */
+  willRun: boolean;
+  /** Whether the previous effect returned a cleanup function */
+  hasCleanup: boolean;
+}
+
+/**
+ * Component lifecycle event types for the timeline.
+ */
+export type TimelineEventType =
+  | 'mount'
+  | 'unmount'
+  | 'render'
+  | 'effect-run'
+  | 'effect-cleanup'
+  | 'state-update'
+  | 'props-change';
+
+/**
+ * A single event in a component's lifecycle timeline.
+ */
+export interface TimelineEvent {
+  type: TimelineEventType;
+  timestamp: number;
+  /** Render duration in ms (for render events) */
+  duration?: number;
+  /** Additional context (e.g., which hook, which prop) */
+  detail?: SerializedValue;
+}
+
+/**
+ * Console log levels captured by the console tracker.
+ */
+export type ConsoleLevel = 'log' | 'warn' | 'error' | 'info' | 'debug';
+
+/**
+ * A captured console.log/warn/error/info/debug call with fiber attribution.
+ */
+export interface ConsoleCaptureEntry {
+  /** Console method that was called */
+  level: ConsoleLevel;
+  /** Serialized arguments passed to console */
+  args: SerializedValue[];
+  /** When the console call occurred */
+  timestamp: number;
+  /** Component name if called during a React render */
+  componentName?: string;
+  /** Ancestor chain: ["App", "Dashboard", "Card"] */
+  ancestorChain?: string[];
+  /** Path-based node ID if attributable */
+  nodeId?: string;
+}
+
+// ============================================================================
+// New Runtime Messages (Console-Free Debugging)
+// ============================================================================
+
+export interface RuntimeNodeHooksMessage {
+  type: 'runtime:nodeHooks';
+  nodeId: string;
+  hooks: HookInfo[];
+  timestamp: number;
+}
+
+export interface RuntimeNodeEffectsMessage {
+  type: 'runtime:nodeEffects';
+  nodeId: string;
+  effects: EffectInfo[];
+  timestamp: number;
+}
+
+export interface RuntimeDetailedRenderReasonMessage {
+  type: 'runtime:detailedRenderReason';
+  nodeId: string;
+  reason: DetailedRenderReason;
+  timestamp: number;
+}
+
+export interface RuntimeTimelineEventMessage {
+  type: 'runtime:timelineEvent';
+  nodeId: string;
+  componentName: string;
+  event: TimelineEvent;
+}
+
+export interface RuntimeConsoleCaptureMessage {
+  type: 'runtime:consoleCapture';
+  entries: ConsoleCaptureEntry[];
+  timestamp: number;
+}
+
 /**
  * Messages received from extension
  */
@@ -187,7 +367,13 @@ export type ExtensionToRuntimeMessage =
   | { type: 'ext:requestNodeProps'; nodeId: string }
   | { type: 'ext:startTreeTracking' }
   | { type: 'ext:stopTreeTracking' }
-  | { type: 'ext:requestFullSnapshot' };
+  | { type: 'ext:requestFullSnapshot' }
+  | { type: 'ext:requestNodeHooks'; nodeId: string }
+  | { type: 'ext:requestNodeEffects'; nodeId: string }
+  | { type: 'ext:requestDetailedRenderReason'; nodeId: string }
+  | { type: 'ext:requestTimeline'; nodeId: string }
+  | { type: 'ext:startConsoleCapture' }
+  | { type: 'ext:stopConsoleCapture' };
 
 export interface TrackingOptions {
   trackAllRenders?: boolean;
