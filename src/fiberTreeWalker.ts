@@ -179,6 +179,11 @@ let hookedRendererID: number | null = null;
 // Track which strategy is active
 let activeStrategy: "devtools" | "dom" | null = null;
 
+// Track when the last snapshot was actually sent, so the Profiler-based
+// fallback can kick in if the DevTools hook stops firing (React 19 compat).
+let lastSnapshotSentTime = 0;
+const DEVTOOLS_STALE_THRESHOLD_MS = 2000; // If no DevTools snapshot in 2s, allow DOM fallback
+
 // Fiber reference cache: nodeId → fiber, rebuilt on every tree walk.
 // Used for on-demand props lookup (getNodeProps) so we don't re-walk the tree.
 // Fiber references stay valid because React reuses fiber objects across renders.
@@ -673,6 +678,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
           tree,
           timestamp: Date.now(),
         });
+        lastSnapshotSentTime = Date.now();
         // Reset diff sequence on full snapshot
         diffSeq = 0;
       } else {
@@ -694,6 +700,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
             updated: diff.updated,
             timestamp: Date.now(),
           });
+          lastSnapshotSentTime = Date.now();
           diffSeq++;
         } else {
           // Nothing changed — skip sending entirely to save bandwidth
@@ -816,14 +823,24 @@ function computeTreeDiff(
  * Request a tree snapshot using the DOM fallback approach.
  * Called from FloTraceProvider's Profiler onRender callback after each React commit.
  * This is the primary way to trigger tree walks when DevTools hook isn't available.
+ *
+ * When the DevTools hook strategy is active, this acts as a safety net:
+ * if no snapshot has been sent via onCommitFiberRoot within DEVTOOLS_STALE_THRESHOLD_MS,
+ * we fall back to DOM-based snapshots. This handles React 19 compatibility issues
+ * where onCommitFiberRoot may not fire reliably for all commits.
  */
 export function requestTreeSnapshot(): void {
   if (!isInstalled) {
     return;
   }
 
-  // If using DevTools hook strategy, snapshots are already being sent via onCommitFiberRoot
-  if (activeStrategy === "devtools") return;
+  // If using DevTools hook strategy AND it's been sending snapshots recently, skip.
+  // Otherwise fall through to DOM fallback (React 19 compat safety net).
+  if (activeStrategy === "devtools") {
+    const elapsed = Date.now() - lastSnapshotSentTime;
+    if (elapsed < DEVTOOLS_STALE_THRESHOLD_MS) return;
+    console.log("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
+  }
 
   // DOM fallback: find the fiber root from DOM elements
   const root = findFiberRootFromDOM();
@@ -1154,6 +1171,7 @@ export function uninstallFiberTreeWalker(): void {
   previousFlatTree = null;
   snapshotCounter = 0;
   diffSeq = 0;
+  lastSnapshotSentTime = 0;
   isInstalled = false;
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }

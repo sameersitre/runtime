@@ -779,6 +779,8 @@ var originalOnCommitFiberRoot = null;
 var isInstalled2 = false;
 var hookedRendererID = null;
 var activeStrategy = null;
+var lastSnapshotSentTime = 0;
+var DEVTOOLS_STALE_THRESHOLD_MS = 2e3;
 var fiberRefMap = /* @__PURE__ */ new Map();
 function getComponentName(fiber) {
   const type = fiber.type;
@@ -1065,6 +1067,7 @@ function sendDebouncedSnapshot(root) {
           tree,
           timestamp: Date.now()
         });
+        lastSnapshotSentTime = Date.now();
         diffSeq = 0;
       } else {
         const diff = computeTreeDiff(previousFlatTree, currentFlatTree);
@@ -1087,6 +1090,7 @@ function sendDebouncedSnapshot(root) {
             updated: diff.updated,
             timestamp: Date.now()
           });
+          lastSnapshotSentTime = Date.now();
           diffSeq++;
         } else {
           console.log("[FloTrace] Tree unchanged, skipping diff");
@@ -1149,7 +1153,11 @@ function requestTreeSnapshot() {
   if (!isInstalled2) {
     return;
   }
-  if (activeStrategy === "devtools") return;
+  if (activeStrategy === "devtools") {
+    const elapsed = Date.now() - lastSnapshotSentTime;
+    if (elapsed < DEVTOOLS_STALE_THRESHOLD_MS) return;
+    console.log("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
+  }
   const root = findFiberRootFromDOM();
   if (root) {
     sendDebouncedSnapshot(root);
@@ -1360,6 +1368,7 @@ function uninstallFiberTreeWalker() {
   previousFlatTree = null;
   snapshotCounter = 0;
   diffSeq = 0;
+  lastSnapshotSentTime = 0;
   isInstalled2 = false;
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }

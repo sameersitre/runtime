@@ -690,6 +690,11 @@ declare global {
  * Request a tree snapshot using the DOM fallback approach.
  * Called from FloTraceProvider's Profiler onRender callback after each React commit.
  * This is the primary way to trigger tree walks when DevTools hook isn't available.
+ *
+ * When the DevTools hook strategy is active, this acts as a safety net:
+ * if no snapshot has been sent via onCommitFiberRoot within DEVTOOLS_STALE_THRESHOLD_MS,
+ * we fall back to DOM-based snapshots. This handles React 19 compatibility issues
+ * where onCommitFiberRoot may not fire reliably for all commits.
  */
 declare function requestTreeSnapshot(): void;
 /**
