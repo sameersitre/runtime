@@ -253,6 +253,56 @@ function isUserComponent(fiber: Fiber): boolean {
   return true;
 }
 
+// ============================================================================
+// Framework component detection
+// ============================================================================
+
+/**
+ * Known framework/library wrapper component names.
+ * These pass isUserComponent() but are framework internals users typically don't want to see.
+ */
+const FRAMEWORK_COMPONENT_NAMES: Set<string> = new Set([
+  // Next.js App Router internals
+  "InnerLayoutRouter", "OuterLayoutRouter", "HotReload", "RedirectBoundary",
+  "NotFoundBoundary", "RenderFromTemplateContext", "ScrollAndFocusHandler",
+  "AppRouter", "ServerRoot", "ReactDevOverlay", "PathnameContextProviderAdapter",
+  "MetadataBoundary", "ViewportBoundary", "NotFoundErrorBoundary",
+  "RedirectErrorBoundary", "InnerScrollAndFocusHandler", "GlobalError",
+  // React Router v6
+  "Routes", "Route", "Router", "BrowserRouter", "HashRouter", "MemoryRouter",
+  "Outlet", "Navigate", "RenderedRoute", "RouterProvider",
+  // Common wrappers
+  "Suspense", "ErrorBoundary", "QueryClientProvider", "PersistGate",
+]);
+
+/**
+ * File path patterns indicating framework/library source.
+ */
+const FRAMEWORK_PATH_PATTERNS: RegExp[] = [
+  /next[\\/]dist/,
+  /react-router/,
+  /react-dom/,
+  /@tanstack[\\/]/,
+  /react-redux/,
+];
+
+/**
+ * Detect if a user-visible component is actually a framework/library wrapper.
+ * Called only for fibers that already passed isUserComponent().
+ */
+function isFrameworkComponent(fiber: Fiber, name: string): boolean {
+  if (FRAMEWORK_COMPONENT_NAMES.has(name)) return true;
+
+  const filePath = fiber._debugSource?.fileName;
+  if (filePath) {
+    for (const pattern of FRAMEWORK_PATH_PATTERNS) {
+      if (pattern.test(filePath)) return true;
+    }
+  }
+
+  return false;
+}
+
 /**
  * Build a path-based stable ID for a fiber node.
  * Format: "App-0/Dashboard-0/Card-2"
@@ -387,6 +437,7 @@ function walkFiber(
             ? children.slice(0, MAX_CHILDREN_PER_NODE)
             : children;
 
+        const framework = isFrameworkComponent(current, name) || undefined;
         nodes.push({
           id: nodeId,
           name,
@@ -397,6 +448,7 @@ function walkFiber(
           renderDuration: current.actualDuration,
           filePath: current._debugSource?.fileName,
           lineNumber: current._debugSource?.lineNumber,
+          isFramework: framework,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely

@@ -179,6 +179,8 @@ export interface LiveTreeNode {
   lineNumber?: number;
   /** Why this component rendered (detected via fiber.alternate props comparison) */
   renderReason?: 'mount' | 'props-changed' | 'state-or-context' | 'parent';
+  /** True if this component is a framework/library wrapper (Next.js, React Router, etc.) */
+  isFramework?: boolean;
 }
 
 // ============================================================================

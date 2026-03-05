@@ -879,6 +879,59 @@ function isUserComponent(fiber) {
   if (fiber._debugSource?.fileName?.includes("node_modules")) return false;
   return true;
 }
+var FRAMEWORK_COMPONENT_NAMES = /* @__PURE__ */ new Set([
+  // Next.js App Router internals
+  "InnerLayoutRouter",
+  "OuterLayoutRouter",
+  "HotReload",
+  "RedirectBoundary",
+  "NotFoundBoundary",
+  "RenderFromTemplateContext",
+  "ScrollAndFocusHandler",
+  "AppRouter",
+  "ServerRoot",
+  "ReactDevOverlay",
+  "PathnameContextProviderAdapter",
+  "MetadataBoundary",
+  "ViewportBoundary",
+  "NotFoundErrorBoundary",
+  "RedirectErrorBoundary",
+  "InnerScrollAndFocusHandler",
+  "GlobalError",
+  // React Router v6
+  "Routes",
+  "Route",
+  "Router",
+  "BrowserRouter",
+  "HashRouter",
+  "MemoryRouter",
+  "Outlet",
+  "Navigate",
+  "RenderedRoute",
+  "RouterProvider",
+  // Common wrappers
+  "Suspense",
+  "ErrorBoundary",
+  "QueryClientProvider",
+  "PersistGate"
+]);
+var FRAMEWORK_PATH_PATTERNS = [
+  /next[\\/]dist/,
+  /react-router/,
+  /react-dom/,
+  /@tanstack[\\/]/,
+  /react-redux/
+];
+function isFrameworkComponent(fiber, name) {
+  if (FRAMEWORK_COMPONENT_NAMES.has(name)) return true;
+  const filePath = fiber._debugSource?.fileName;
+  if (filePath) {
+    for (const pattern of FRAMEWORK_PATH_PATTERNS) {
+      if (pattern.test(filePath)) return true;
+    }
+  }
+  return false;
+}
 function buildNodeId(name, sameNameIndex, parentId) {
   const segment = `${name}-${sameNameIndex}`;
   return parentId ? `${parentId}/${segment}` : segment;
@@ -935,6 +988,7 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           depth + 1
         );
         const truncatedChildren = children.length > MAX_CHILDREN_PER_NODE ? children.slice(0, MAX_CHILDREN_PER_NODE) : children;
+        const framework = isFrameworkComponent(current, name) || void 0;
         nodes.push({
           id: nodeId,
           name,
@@ -944,7 +998,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           renderReason,
           renderDuration: current.actualDuration,
           filePath: current._debugSource?.fileName,
-          lineNumber: current._debugSource?.lineNumber
+          lineNumber: current._debugSource?.lineNumber,
+          isFramework: framework
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else {
