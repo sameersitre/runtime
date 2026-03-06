@@ -932,7 +932,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           renderDuration: current.actualDuration,
           filePath: current._debugSource?.fileName,
           lineNumber: current._debugSource?.lineNumber,
-          isFramework: framework
+          isFramework: framework,
+          reactKey: typeof current.key === "string" ? current.key : void 0
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else {

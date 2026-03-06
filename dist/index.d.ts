@@ -156,6 +156,8 @@ interface LiveTreeNode {
     renderReason?: 'mount' | 'props-changed' | 'state-or-context' | 'parent';
     /** True if this component is a framework/library wrapper (Next.js, React Router, etc.) */
     isFramework?: boolean;
+    /** React key prop (only string keys, used to differentiate same-name siblings in search) */
+    reactKey?: string;
 }
 /**
  * Enhanced render reason with specific prop/state/context changes.
@@ -592,6 +594,7 @@ declare function useTrackProps(componentName: string, props: Record<string, unkn
  */
 interface Fiber {
     tag: number;
+    key: string | null;
     type: FiberType | null;
     child: Fiber | null;
     sibling: Fiber | null;

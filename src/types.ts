@@ -181,6 +181,8 @@ export interface LiveTreeNode {
   renderReason?: 'mount' | 'props-changed' | 'state-or-context' | 'parent';
   /** True if this component is a framework/library wrapper (Next.js, React Router, etc.) */
   isFramework?: boolean;
+  /** React key prop (only string keys, used to differentiate same-name siblings in search) */
+  reactKey?: string;
 }
 
 // ============================================================================

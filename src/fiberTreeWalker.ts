@@ -55,6 +55,7 @@ const USER_COMPONENT_TAGS: Set<number> = new Set([
  */
 export interface Fiber {
   tag: number;
+  key: string | null;
   type: FiberType | null;
   child: Fiber | null;
   sibling: Fiber | null;
@@ -449,6 +450,7 @@ function walkFiber(
           filePath: current._debugSource?.fileName,
           lineNumber: current._debugSource?.lineNumber,
           isFramework: framework,
+          reactKey: typeof current.key === 'string' ? current.key : undefined,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
