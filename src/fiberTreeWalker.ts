@@ -244,6 +244,9 @@ function isUserComponent(fiber: Fiber): boolean {
   )
     return false;
 
+  // Filter FloTrace's own internal components (provider, profiler wrapper, HOC wrappers)
+  if (name.startsWith("FloTrace")) return false;
+
   // Filter library-style displayNames (e.g., "@mantine/core/Box", "@radix-ui/Popover")
   // Libraries set displayName with package path — user components never have @ or /
   if (name.startsWith("@") || name.includes("/")) return false;
