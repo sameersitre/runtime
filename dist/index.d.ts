@@ -158,6 +158,8 @@ interface LiveTreeNode {
     isFramework?: boolean;
     /** React key prop (only string keys, used to differentiate same-name siblings in search) */
     reactKey?: string;
+    /** TanStack Query hashes observed by this component (detected from useRef → QueryObserver) */
+    queryHashes?: string[];
 }
 /**
  * Enhanced render reason with specific prop/state/context changes.
@@ -308,8 +310,36 @@ interface TanStackQueryInfo {
     /** Config values */
     staleTime?: number;
     gcTime?: number;
+    /** Additional config for health analysis */
+    refetchInterval?: number | false;
+    refetchOnWindowFocus?: boolean | 'always';
+    refetchOnMount?: boolean | 'always';
+    refetchOnReconnect?: boolean | 'always';
+    networkMode?: string;
+    enabled?: boolean;
+    retry?: number | boolean;
     /** Data shape descriptor (key names + types, no values) */
     dataShape?: SerializedValue;
+    /** Number of times query refetched but data was identical */
+    wastedRefetchCount?: number;
+    /** Total number of fetches tracked */
+    totalFetchCount?: number;
+    /** Per-query state transition history (ring buffer, max 50) */
+    events?: TanStackQueryEvent[];
+}
+/** A state transition event for a TanStack Query */
+interface TanStackQueryEvent {
+    timestamp: number;
+    /** Status before the transition */
+    fromStatus: string;
+    /** Status after the transition */
+    toStatus: string;
+    /** Fetch status before the transition */
+    fromFetchStatus: string;
+    /** Fetch status after the transition */
+    toFetchStatus: string;
+    /** Whether the data changed during this transition */
+    dataChanged: boolean;
 }
 /** Serialized mutation info sent over WebSocket */
 interface TanStackMutationInfo {
@@ -321,11 +351,39 @@ interface TanStackMutationInfo {
     errorMessage?: string;
     mutationKey?: SerializedValue;
     scope?: string;
+    /** Correlation ID linking this mutation to queries it triggered */
+    lastCorrelationId?: string;
+}
+/** Mutation → query invalidation → refetch correlation event */
+interface MutationCorrelation {
+    /** Unique ID for this correlation event */
+    correlationId: string;
+    /** The mutation that triggered the cascade */
+    mutationId: number;
+    /** Mutation key (if provided) for display */
+    mutationKey?: SerializedValue;
+    /** Timestamp when mutation completed (status → 'success') */
+    mutationCompletedAt: number;
+    /** Queries that started fetching within the correlation window */
+    affectedQueries: Array<{
+        queryHash: string;
+        queryKey: SerializedValue;
+        /** When the query started fetching */
+        fetchStartedAt: number;
+        /** Latency: fetchStartedAt - mutationCompletedAt */
+        latencyMs: number;
+        /** Whether the refetch actually changed data */
+        dataChanged?: boolean;
+    }>;
+    /** Timestamp when the correlation window closed */
+    resolvedAt: number;
 }
 interface RuntimeTanStackQueryUpdateMessage {
     type: 'runtime:tanstackQuery';
     queries: TanStackQueryInfo[];
     mutations: TanStackMutationInfo[];
+    /** New correlation events since last snapshot */
+    correlations?: MutationCorrelation[];
     timestamp: number;
 }
 /**
@@ -531,11 +589,13 @@ declare function uninstallReduxTracker(): void;
  * Subscribes to QueryCache and MutationCache events and sends
  * query/mutation state snapshots to the FloTrace desktop app.
  *
- * Design: User passes their QueryClient via the `queryClient` prop on <FloTraceProvider>.
- * We subscribe via queryClient.getQueryCache().subscribe() and getMutationCache().subscribe().
+ * Features:
+ * - Cache state snapshots with config for health analysis
+ * - Wasted refetch detection (data unchanged across fetches)
+ * - Per-query state transition timeline (ring buffer)
+ * - Mutation → query correlation (detects invalidation cascades)
  *
  * Uses duck-typed interface — no @tanstack/react-query dependency needed.
- * Same pattern as zustandTracker and reduxTracker.
  */
 
 /** Minimal Query interface — only what we need to read state */

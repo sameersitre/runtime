@@ -768,6 +768,48 @@ var USER_COMPONENT_TAGS = /* @__PURE__ */ new Set([
   FIBER_TAGS.MemoComponent,
   FIBER_TAGS.SimpleMemoComponent
 ]);
+function isLikelyQueryObserver(obj) {
+  if (obj === null || typeof obj !== "object") return false;
+  const candidate = obj;
+  return typeof candidate.getCurrentResult === "function" && typeof candidate.subscribe === "function";
+}
+function getQueryHashFromObserver(observer) {
+  if (observer.options && typeof observer.options === "object") {
+    const opts = observer.options;
+    if (typeof opts.queryHash === "string") return opts.queryHash;
+  }
+  if (observer.currentQuery && typeof observer.currentQuery === "object") {
+    const q = observer.currentQuery;
+    if (typeof q.queryHash === "string") return q.queryHash;
+  }
+  if (typeof observer.queryHash === "string") return observer.queryHash;
+  return null;
+}
+function detectQueryObserverHashes(fiber) {
+  let hookState = fiber.memoizedState;
+  if (!hookState) return void 0;
+  const seen = /* @__PURE__ */ new Set();
+  let iterations = 0;
+  while (hookState && iterations < 100) {
+    iterations++;
+    try {
+      const ms = hookState.memoizedState;
+      if (isLikelyQueryObserver(ms)) {
+        const hash = getQueryHashFromObserver(ms);
+        if (hash) seen.add(hash);
+      } else if (ms !== null && typeof ms === "object" && !Array.isArray(ms)) {
+        const ref = ms.current;
+        if (isLikelyQueryObserver(ref)) {
+          const hash = getQueryHashFromObserver(ref);
+          if (hash) seen.add(hash);
+        }
+      }
+    } catch {
+    }
+    hookState = hookState.next;
+  }
+  return seen.size > 0 ? Array.from(seen) : void 0;
+}
 var MAX_TREE_DEPTH = 100;
 var MAX_CHILDREN_PER_NODE = 300;
 var debounceTimer = null;
@@ -924,6 +966,7 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
         );
         const truncatedChildren = children.length > MAX_CHILDREN_PER_NODE ? children.slice(0, MAX_CHILDREN_PER_NODE) : children;
         const framework = isFrameworkComponent(current, name) || void 0;
+        const queryHashes = detectQueryObserverHashes(current);
         nodes.push({
           id: nodeId,
           name,
@@ -935,7 +978,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           filePath: current._debugSource?.fileName,
           lineNumber: current._debugSource?.lineNumber,
           isFramework: framework,
-          reactKey: typeof current.key === "string" ? current.key : void 0
+          reactKey: typeof current.key === "string" ? current.key : void 0,
+          queryHashes
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else {
@@ -1619,6 +1663,16 @@ var queryUnsubscribe = null;
 var mutationUnsubscribe = null;
 var debounceTimer3 = null;
 var DEBOUNCE_MS3 = 300;
+var MAX_EVENTS_PER_QUERY = 50;
+var queryTracking = /* @__PURE__ */ new Map();
+var CORRELATION_WINDOW_MS = 500;
+var MAX_COMPLETED_CORRELATIONS = 20;
+var correlationCounter = 0;
+var pendingCorrelations = /* @__PURE__ */ new Map();
+var completedCorrelations = [];
+var mutationPrevStatus = /* @__PURE__ */ new Map();
+var mutationCorrelationMap = /* @__PURE__ */ new Map();
+var cachedQueryCache = null;
 function isTanStackQueryClient(obj) {
   if (!obj || typeof obj !== "object") return false;
   const candidate = obj;
@@ -1634,18 +1688,33 @@ function installTanStackQueryTracker(queryClient, client4) {
   try {
     const queryCache = queryClient.getQueryCache();
     const mutationCache = queryClient.getMutationCache();
+    cachedQueryCache = queryCache;
+    for (const query of queryCache.getAll()) {
+      if (!queryTracking.has(query.queryHash)) {
+        initQueryTracking(query);
+      }
+    }
+    for (const mutation of mutationCache.getAll()) {
+      mutationPrevStatus.set(mutation.mutationId, mutation.state.status);
+    }
     sendSnapshot(queryCache, mutationCache, client4);
     queryUnsubscribe = queryCache.subscribe((event) => {
       try {
         if (event.type === "added" || event.type === "removed" || event.type === "updated") {
+          if (event.query) {
+            updateQueryTracking(event.query, event.type);
+          }
           scheduleSnapshot(queryCache, mutationCache, client4);
         }
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Query cache subscribe callback:", error);
       }
     });
-    mutationUnsubscribe = mutationCache.subscribe(() => {
+    mutationUnsubscribe = mutationCache.subscribe((event) => {
       try {
+        if (event.mutation) {
+          updateMutationTracking(event.mutation, queryCache, mutationCache, client4);
+        }
         scheduleSnapshot(queryCache, mutationCache, client4);
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Mutation cache subscribe callback:", error);
@@ -1678,8 +1747,161 @@ function uninstallTanStackQueryTracker() {
     }
     mutationUnsubscribe = null;
   }
+  for (const pending of pendingCorrelations.values()) {
+    clearTimeout(pending.timeoutId);
+  }
+  pendingCorrelations.clear();
+  cachedQueryCache = null;
   isInstalled5 = false;
   console.log("[FloTrace] TanStack Query tracker uninstalled");
+}
+function computeDataHash(data) {
+  if (data === null || data === void 0) return "__null__";
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return "__unhashable__";
+  }
+}
+function initQueryTracking(query) {
+  const state = {
+    lastDataHash: computeDataHash(query.state.data),
+    lastDataUpdatedAt: query.state.dataUpdatedAt,
+    prevStatus: query.state.status,
+    prevFetchStatus: query.state.fetchStatus,
+    totalFetchCount: 0,
+    wastedRefetchCount: 0,
+    events: []
+  };
+  queryTracking.set(query.queryHash, state);
+  return state;
+}
+function updateQueryTracking(query, eventType) {
+  let tracking = queryTracking.get(query.queryHash);
+  if (eventType === "removed") {
+    queryTracking.delete(query.queryHash);
+    return;
+  }
+  if (!tracking) {
+    tracking = initQueryTracking(query);
+  }
+  const currentStatus = query.state.status;
+  const currentFetchStatus = query.state.fetchStatus;
+  const statusChanged = tracking.prevStatus !== currentStatus;
+  const fetchStatusChanged = tracking.prevFetchStatus !== currentFetchStatus;
+  if (statusChanged || fetchStatusChanged) {
+    const currentDataHash = computeDataHash(query.state.data);
+    const dataChanged = currentDataHash !== tracking.lastDataHash;
+    const event = {
+      timestamp: Date.now(),
+      fromStatus: tracking.prevStatus,
+      toStatus: currentStatus,
+      fromFetchStatus: tracking.prevFetchStatus,
+      toFetchStatus: currentFetchStatus,
+      dataChanged
+    };
+    tracking.events.push(event);
+    if (tracking.events.length > MAX_EVENTS_PER_QUERY) {
+      tracking.events.shift();
+    }
+    if (tracking.prevFetchStatus === "fetching" && currentFetchStatus === "idle" && currentStatus === "success") {
+      tracking.totalFetchCount++;
+      if (!dataChanged) {
+        tracking.wastedRefetchCount++;
+      }
+      tracking.lastDataHash = currentDataHash;
+      tracking.lastDataUpdatedAt = query.state.dataUpdatedAt;
+    }
+    if (tracking.prevFetchStatus === "idle" && currentFetchStatus === "fetching") {
+      const now = Date.now();
+      for (const pending of pendingCorrelations.values()) {
+        if (pending.idleQueryHashes.has(query.queryHash)) {
+          pending.affectedQueries.set(query.queryHash, {
+            fetchStartedAt: now,
+            queryKey: query.queryKey
+          });
+        }
+      }
+    }
+    tracking.prevStatus = currentStatus;
+    tracking.prevFetchStatus = currentFetchStatus;
+  }
+}
+function openCorrelationWindow(mutation, queryCache, mutationCache, client4) {
+  const correlationId = `corr-${++correlationCounter}`;
+  const now = Date.now();
+  const idleQueryHashes = /* @__PURE__ */ new Set();
+  for (const query of queryCache.getAll()) {
+    if (query.state.fetchStatus === "idle") {
+      idleQueryHashes.add(query.queryHash);
+    }
+  }
+  const timeoutId = setTimeout(() => {
+    resolveCorrelation(correlationId, queryCache, mutationCache, client4);
+  }, CORRELATION_WINDOW_MS);
+  pendingCorrelations.set(correlationId, {
+    correlationId,
+    mutationId: mutation.mutationId,
+    mutationKey: mutation.options.mutationKey,
+    completedAt: now,
+    idleQueryHashes,
+    affectedQueries: /* @__PURE__ */ new Map(),
+    timeoutId
+  });
+  mutationCorrelationMap.set(mutation.mutationId, correlationId);
+}
+function resolveCorrelation(correlationId, queryCache, mutationCache, client4) {
+  const pending = pendingCorrelations.get(correlationId);
+  if (!pending) return;
+  pendingCorrelations.delete(correlationId);
+  if (pending.affectedQueries.size === 0) return;
+  const affectedQueries = [];
+  for (const [queryHash, info] of pending.affectedQueries) {
+    const tracking = queryTracking.get(queryHash);
+    let queryKeySerialized;
+    try {
+      queryKeySerialized = serializeValue(info.queryKey);
+    } catch {
+      queryKeySerialized = "[serialization failed]";
+    }
+    affectedQueries.push({
+      queryHash,
+      queryKey: queryKeySerialized,
+      fetchStartedAt: info.fetchStartedAt,
+      latencyMs: info.fetchStartedAt - pending.completedAt,
+      // dataChanged is resolved from the latest tracking state if the fetch completed
+      dataChanged: tracking?.events.length ? tracking.events[tracking.events.length - 1].dataChanged : void 0
+    });
+  }
+  let mutationKeySerialized;
+  if (pending.mutationKey) {
+    try {
+      mutationKeySerialized = serializeValue(pending.mutationKey);
+    } catch {
+      mutationKeySerialized = "[serialization failed]";
+    }
+  }
+  const correlation = {
+    correlationId,
+    mutationId: pending.mutationId,
+    mutationKey: mutationKeySerialized,
+    mutationCompletedAt: pending.completedAt,
+    affectedQueries,
+    resolvedAt: Date.now()
+  };
+  completedCorrelations.push(correlation);
+  if (completedCorrelations.length > MAX_COMPLETED_CORRELATIONS) {
+    completedCorrelations = completedCorrelations.slice(-MAX_COMPLETED_CORRELATIONS);
+  }
+  scheduleSnapshot(queryCache, mutationCache, client4);
+}
+function updateMutationTracking(mutation, queryCache, mutationCache, client4) {
+  const currentStatus = mutation.state.status;
+  const prevStatus = mutationPrevStatus.get(mutation.mutationId);
+  mutationPrevStatus.set(mutation.mutationId, currentStatus);
+  if (prevStatus && prevStatus !== "success" && currentStatus === "success") {
+    openCorrelationWindow(mutation, queryCache, mutationCache, client4);
+  }
 }
 function scheduleSnapshot(queryCache, mutationCache, client4) {
   if (debounceTimer3) clearTimeout(debounceTimer3);
@@ -1696,6 +1918,13 @@ function serializeQueryData(data) {
     return { __type: "truncated", originalType: typeof data };
   }
 }
+function extractErrorMessage(error) {
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    return "Unknown error";
+  }
+}
 function serializeQuery(query) {
   let queryKeySerialized;
   try {
@@ -1703,14 +1932,8 @@ function serializeQuery(query) {
   } catch {
     queryKeySerialized = "[serialization failed]";
   }
-  let errorMessage;
-  if (query.state.error) {
-    try {
-      errorMessage = query.state.error instanceof Error ? query.state.error.message : String(query.state.error);
-    } catch {
-      errorMessage = "Unknown error";
-    }
-  }
+  const errorMessage = query.state.error ? extractErrorMessage(query.state.error) : void 0;
+  const tracking = queryTracking.get(query.queryHash);
   return {
     queryKey: queryKeySerialized,
     queryHash: query.queryHash,
@@ -1727,18 +1950,24 @@ function serializeQuery(query) {
     observerCount: safeCall(() => query.getObserversCount(), 0),
     staleTime: query.options.staleTime,
     gcTime: query.options.gcTime,
-    dataShape: serializeQueryData(query.state.data)
+    // Phase 1: additional config for health analysis
+    refetchInterval: query.options.refetchInterval,
+    refetchOnWindowFocus: query.options.refetchOnWindowFocus,
+    refetchOnMount: query.options.refetchOnMount,
+    refetchOnReconnect: query.options.refetchOnReconnect,
+    networkMode: query.options.networkMode,
+    enabled: query.options.enabled,
+    retry: query.options.retry,
+    dataShape: serializeQueryData(query.state.data),
+    // Phase 2: wasted refetch tracking
+    wastedRefetchCount: tracking?.wastedRefetchCount,
+    totalFetchCount: tracking?.totalFetchCount,
+    // Phase 3: query timeline
+    events: tracking?.events.length ? [...tracking.events] : void 0
   };
 }
 function serializeMutation(mutation) {
-  let errorMessage;
-  if (mutation.state.error) {
-    try {
-      errorMessage = mutation.state.error instanceof Error ? mutation.state.error.message : String(mutation.state.error);
-    } catch {
-      errorMessage = "Unknown error";
-    }
-  }
+  const errorMessage = mutation.state.error ? extractErrorMessage(mutation.state.error) : void 0;
   let mutationKey;
   if (mutation.options.mutationKey) {
     try {
@@ -1755,7 +1984,8 @@ function serializeMutation(mutation) {
     failureCount: mutation.state.failureCount,
     errorMessage,
     mutationKey,
-    scope: mutation.options.scope?.id
+    scope: mutation.options.scope?.id,
+    lastCorrelationId: mutationCorrelationMap.get(mutation.mutationId)
   };
 }
 function sendSnapshot(queryCache, mutationCache, client4) {
@@ -1777,10 +2007,15 @@ function sendSnapshot(queryCache, mutationCache, client4) {
         console.error(`[FloTrace] Error serializing mutation ${mutation.mutationId}:`, error);
       }
     }
+    const correlations = completedCorrelations.length > 0 ? [...completedCorrelations] : void 0;
+    if (correlations) {
+      completedCorrelations = [];
+    }
     client4.sendImmediate({
       type: "runtime:tanstackQuery",
       queries,
       mutations,
+      correlations,
       timestamp: Date.now()
     });
   } catch (error) {

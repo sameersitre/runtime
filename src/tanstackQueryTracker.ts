@@ -4,14 +4,16 @@
  * Subscribes to QueryCache and MutationCache events and sends
  * query/mutation state snapshots to the FloTrace desktop app.
  *
- * Design: User passes their QueryClient via the `queryClient` prop on <FloTraceProvider>.
- * We subscribe via queryClient.getQueryCache().subscribe() and getMutationCache().subscribe().
+ * Features:
+ * - Cache state snapshots with config for health analysis
+ * - Wasted refetch detection (data unchanged across fetches)
+ * - Per-query state transition timeline (ring buffer)
+ * - Mutation → query correlation (detects invalidation cascades)
  *
  * Uses duck-typed interface — no @tanstack/react-query dependency needed.
- * Same pattern as zustandTracker and reduxTracker.
  */
 
-import type { SerializedValue, TanStackQueryInfo, TanStackMutationInfo } from './types';
+import type { SerializedValue, TanStackQueryInfo, TanStackMutationInfo, TanStackQueryEvent, MutationCorrelation } from './types';
 import { serializeValue } from './serializer';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
@@ -95,7 +97,63 @@ let isInstalled = false;
 let queryUnsubscribe: (() => void) | null = null;
 let mutationUnsubscribe: (() => void) | null = null;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-const DEBOUNCE_MS = 300; // slightly higher than Zustand — queries change less frequently
+const DEBOUNCE_MS = 300;
+
+// ============================================================================
+// Per-Query Tracking State (wasted refetch + timeline)
+// ============================================================================
+
+const MAX_EVENTS_PER_QUERY = 50;
+
+interface QueryTrackingState {
+  /** Fast hash of last known data (for wasted refetch detection) */
+  lastDataHash: string;
+  /** Last known dataUpdatedAt timestamp */
+  lastDataUpdatedAt: number;
+  /** Previous status for transition detection */
+  prevStatus: string;
+  /** Previous fetchStatus for transition detection */
+  prevFetchStatus: string;
+  /** Total fetches observed */
+  totalFetchCount: number;
+  /** Fetches where data didn't change */
+  wastedRefetchCount: number;
+  /** State transition ring buffer */
+  events: TanStackQueryEvent[];
+}
+
+/** Per-query tracking state keyed by queryHash */
+const queryTracking = new Map<string, QueryTrackingState>();
+
+// ============================================================================
+// Phase 5: Mutation → Query Correlation State
+// ============================================================================
+
+const CORRELATION_WINDOW_MS = 500;
+const MAX_COMPLETED_CORRELATIONS = 20;
+let correlationCounter = 0;
+
+interface PendingCorrelation {
+  correlationId: string;
+  mutationId: number;
+  mutationKey?: unknown[];
+  completedAt: number;
+  /** queryHashes that were idle before mutation completed */
+  idleQueryHashes: Set<string>;
+  /** Queries that started fetching within the window */
+  affectedQueries: Map<string, { fetchStartedAt: number; queryKey: unknown[] }>;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
+/** Active correlation windows keyed by correlationId */
+const pendingCorrelations = new Map<string, PendingCorrelation>();
+/** Completed correlations ready to send (ring buffer) */
+let completedCorrelations: MutationCorrelation[] = [];
+/** Per-mutation previous status for transition detection */
+const mutationPrevStatus = new Map<number, string>();
+/** Maps mutationId → last correlationId for UI cross-reference */
+const mutationCorrelationMap = new Map<number, string>();
+
 
 // ============================================================================
 // Validation
@@ -134,6 +192,17 @@ export function installTanStackQueryTracker(
   try {
     const queryCache = queryClient.getQueryCache();
     const mutationCache = queryClient.getMutationCache();
+    // Initialize tracking state for new queries only (preserve existing counts across reinstalls)
+    for (const query of queryCache.getAll()) {
+      if (!queryTracking.has(query.queryHash)) {
+        initQueryTracking(query);
+      }
+    }
+
+    // Initialize mutation previous status
+    for (const mutation of mutationCache.getAll()) {
+      mutationPrevStatus.set(mutation.mutationId, mutation.state.status);
+    }
 
     // Send initial snapshot
     sendSnapshot(queryCache, mutationCache, client);
@@ -141,8 +210,10 @@ export function installTanStackQueryTracker(
     // Subscribe to query cache events
     queryUnsubscribe = queryCache.subscribe((event) => {
       try {
-        // Only send on meaningful events (skip observer-only events for perf)
         if (event.type === 'added' || event.type === 'removed' || event.type === 'updated') {
+          if (event.query) {
+            updateQueryTracking(event.query, event.type);
+          }
           scheduleSnapshot(queryCache, mutationCache, client);
         }
       } catch (error) {
@@ -150,9 +221,12 @@ export function installTanStackQueryTracker(
       }
     });
 
-    // Subscribe to mutation cache events
-    mutationUnsubscribe = mutationCache.subscribe(() => {
+    // Subscribe to mutation cache events (track status transitions for correlation)
+    mutationUnsubscribe = mutationCache.subscribe((event) => {
       try {
+        if (event.mutation) {
+          updateMutationTracking(event.mutation, queryCache, mutationCache, client);
+        }
         scheduleSnapshot(queryCache, mutationCache, client);
       } catch (error) {
         console.error('[FloTrace] Error in TanStack Mutation cache subscribe callback:', error);
@@ -185,8 +259,241 @@ export function uninstallTanStackQueryTracker(): void {
     mutationUnsubscribe = null;
   }
 
+  // Clear pending correlation timeouts
+  for (const pending of pendingCorrelations.values()) {
+    clearTimeout(pending.timeoutId);
+  }
+  pendingCorrelations.clear();
+
+  // Preserve queryTracking, mutationPrevStatus, completedCorrelations, and
+  // mutationCorrelationMap across reinstalls — accumulated over the session.
   isInstalled = false;
   console.log('[FloTrace] TanStack Query tracker uninstalled');
+}
+
+// ============================================================================
+// Per-Query Tracking Logic
+// ============================================================================
+
+/** Fast data hash — JSON.stringify is fast enough for shallow comparison */
+function computeDataHash(data: unknown): string {
+  if (data === null || data === undefined) return '__null__';
+  try {
+    return JSON.stringify(data);
+  } catch {
+    return '__unhashable__';
+  }
+}
+
+function initQueryTracking(query: DuckQuery): QueryTrackingState {
+  const state: QueryTrackingState = {
+    lastDataHash: computeDataHash(query.state.data),
+    lastDataUpdatedAt: query.state.dataUpdatedAt,
+    prevStatus: query.state.status,
+    prevFetchStatus: query.state.fetchStatus,
+    totalFetchCount: 0,
+    wastedRefetchCount: 0,
+    events: [],
+  };
+  queryTracking.set(query.queryHash, state);
+  return state;
+}
+
+function updateQueryTracking(query: DuckQuery, eventType: string): void {
+  let tracking = queryTracking.get(query.queryHash);
+
+  if (eventType === 'removed') {
+    queryTracking.delete(query.queryHash);
+    return;
+  }
+
+  if (!tracking) {
+    tracking = initQueryTracking(query);
+  }
+
+  const currentStatus = query.state.status;
+  const currentFetchStatus = query.state.fetchStatus;
+
+  // Detect state transitions for timeline
+  const statusChanged = tracking.prevStatus !== currentStatus;
+  const fetchStatusChanged = tracking.prevFetchStatus !== currentFetchStatus;
+
+  if (statusChanged || fetchStatusChanged) {
+    // Check if data changed during this transition
+    const currentDataHash = computeDataHash(query.state.data);
+    const dataChanged = currentDataHash !== tracking.lastDataHash;
+
+    // Record timeline event
+    const event: TanStackQueryEvent = {
+      timestamp: Date.now(),
+      fromStatus: tracking.prevStatus,
+      toStatus: currentStatus,
+      fromFetchStatus: tracking.prevFetchStatus,
+      toFetchStatus: currentFetchStatus,
+      dataChanged,
+    };
+    tracking.events.push(event);
+    if (tracking.events.length > MAX_EVENTS_PER_QUERY) {
+      tracking.events.shift();
+    }
+
+    // Wasted refetch detection: fetch completed (fetching → idle) with success but data unchanged
+    if (
+      tracking.prevFetchStatus === 'fetching' &&
+      currentFetchStatus === 'idle' &&
+      currentStatus === 'success'
+    ) {
+      tracking.totalFetchCount++;
+      if (!dataChanged) {
+        tracking.wastedRefetchCount++;
+      }
+      // Update data hash after fetch completes
+      tracking.lastDataHash = currentDataHash;
+      tracking.lastDataUpdatedAt = query.state.dataUpdatedAt;
+    }
+
+    // Correlation: query started fetching → check pending correlation windows
+    if (tracking.prevFetchStatus === 'idle' && currentFetchStatus === 'fetching') {
+      const now = Date.now();
+      for (const pending of pendingCorrelations.values()) {
+        if (pending.idleQueryHashes.has(query.queryHash)) {
+          pending.affectedQueries.set(query.queryHash, {
+            fetchStartedAt: now,
+            queryKey: query.queryKey,
+          });
+        }
+      }
+    }
+
+    tracking.prevStatus = currentStatus;
+    tracking.prevFetchStatus = currentFetchStatus;
+  }
+}
+
+// ============================================================================
+// Phase 5: Mutation Correlation Logic
+// ============================================================================
+
+/**
+ * Called when a mutation transitions to 'success'. Opens a correlation window
+ * and watches for queries that start fetching within CORRELATION_WINDOW_MS.
+ */
+function openCorrelationWindow(
+  mutation: DuckMutation,
+  queryCache: DuckQueryCache,
+  mutationCache: DuckMutationCache,
+  client: FloTraceWebSocketClient,
+): void {
+  const correlationId = `corr-${++correlationCounter}`;
+  const now = Date.now();
+
+  // Snapshot all currently-idle query hashes as baseline
+  const idleQueryHashes = new Set<string>();
+  for (const query of queryCache.getAll()) {
+    if (query.state.fetchStatus === 'idle') {
+      idleQueryHashes.add(query.queryHash);
+    }
+  }
+
+  const timeoutId = setTimeout(() => {
+    resolveCorrelation(correlationId, queryCache, mutationCache, client);
+  }, CORRELATION_WINDOW_MS);
+
+  pendingCorrelations.set(correlationId, {
+    correlationId,
+    mutationId: mutation.mutationId,
+    mutationKey: mutation.options.mutationKey,
+    completedAt: now,
+    idleQueryHashes,
+    affectedQueries: new Map(),
+    timeoutId,
+  });
+
+  mutationCorrelationMap.set(mutation.mutationId, correlationId);
+}
+
+/**
+ * Resolve a correlation window — build the MutationCorrelation and push to completed.
+ */
+function resolveCorrelation(
+  correlationId: string,
+  queryCache: DuckQueryCache,
+  mutationCache: DuckMutationCache,
+  client: FloTraceWebSocketClient,
+): void {
+  const pending = pendingCorrelations.get(correlationId);
+  if (!pending) return;
+  pendingCorrelations.delete(correlationId);
+
+  // Only emit if at least one query was affected
+  if (pending.affectedQueries.size === 0) return;
+
+  const affectedQueries: MutationCorrelation['affectedQueries'] = [];
+  for (const [queryHash, info] of pending.affectedQueries) {
+    // Check if data changed by looking at tracking state
+    const tracking = queryTracking.get(queryHash);
+    let queryKeySerialized: SerializedValue;
+    try {
+      queryKeySerialized = serializeValue(info.queryKey);
+    } catch {
+      queryKeySerialized = '[serialization failed]';
+    }
+    affectedQueries.push({
+      queryHash,
+      queryKey: queryKeySerialized,
+      fetchStartedAt: info.fetchStartedAt,
+      latencyMs: info.fetchStartedAt - pending.completedAt,
+      // dataChanged is resolved from the latest tracking state if the fetch completed
+      dataChanged: tracking?.events.length
+        ? tracking.events[tracking.events.length - 1].dataChanged
+        : undefined,
+    });
+  }
+
+  let mutationKeySerialized: SerializedValue | undefined;
+  if (pending.mutationKey) {
+    try {
+      mutationKeySerialized = serializeValue(pending.mutationKey);
+    } catch {
+      mutationKeySerialized = '[serialization failed]';
+    }
+  }
+
+  const correlation: MutationCorrelation = {
+    correlationId,
+    mutationId: pending.mutationId,
+    mutationKey: mutationKeySerialized,
+    mutationCompletedAt: pending.completedAt,
+    affectedQueries,
+    resolvedAt: Date.now(),
+  };
+
+  completedCorrelations.push(correlation);
+  if (completedCorrelations.length > MAX_COMPLETED_CORRELATIONS) {
+    completedCorrelations = completedCorrelations.slice(-MAX_COMPLETED_CORRELATIONS);
+  }
+
+  // Immediately send a snapshot with the new correlation
+  scheduleSnapshot(queryCache, mutationCache, client);
+}
+
+/**
+ * Track mutation status transitions for correlation detection.
+ */
+function updateMutationTracking(
+  mutation: DuckMutation,
+  queryCache: DuckQueryCache,
+  mutationCache: DuckMutationCache,
+  client: FloTraceWebSocketClient,
+): void {
+  const currentStatus = mutation.state.status;
+  const prevStatus = mutationPrevStatus.get(mutation.mutationId);
+  mutationPrevStatus.set(mutation.mutationId, currentStatus);
+
+  // Open correlation window when mutation succeeds
+  if (prevStatus && prevStatus !== 'success' && currentStatus === 'success') {
+    openCorrelationWindow(mutation, queryCache, mutationCache, client);
+  }
 }
 
 // ============================================================================
@@ -209,10 +516,6 @@ function scheduleSnapshot(
 // Snapshot Serialization
 // ============================================================================
 
-/**
- * Serialize query data using the safe serializer (depth-limited, circular-ref safe).
- * Returns the actual data values so users can inspect query responses in FloTrace.
- */
 function serializeQueryData(data: unknown): SerializedValue {
   if (data === null || data === undefined) return null;
   try {
@@ -239,6 +542,7 @@ function serializeQuery(query: DuckQuery): TanStackQueryInfo {
   }
 
   const errorMessage = query.state.error ? extractErrorMessage(query.state.error) : undefined;
+  const tracking = queryTracking.get(query.queryHash);
 
   return {
     queryKey: queryKeySerialized,
@@ -256,7 +560,20 @@ function serializeQuery(query: DuckQuery): TanStackQueryInfo {
     observerCount: safeCall(() => query.getObserversCount(), 0),
     staleTime: query.options.staleTime,
     gcTime: query.options.gcTime,
+    // Phase 1: additional config for health analysis
+    refetchInterval: query.options.refetchInterval,
+    refetchOnWindowFocus: query.options.refetchOnWindowFocus,
+    refetchOnMount: query.options.refetchOnMount,
+    refetchOnReconnect: query.options.refetchOnReconnect,
+    networkMode: query.options.networkMode,
+    enabled: query.options.enabled,
+    retry: query.options.retry,
     dataShape: serializeQueryData(query.state.data),
+    // Phase 2: wasted refetch tracking
+    wastedRefetchCount: tracking?.wastedRefetchCount,
+    totalFetchCount: tracking?.totalFetchCount,
+    // Phase 3: query timeline
+    events: tracking?.events.length ? [...tracking.events] : undefined,
   };
 }
 
@@ -281,6 +598,7 @@ function serializeMutation(mutation: DuckMutation): TanStackMutationInfo {
     errorMessage,
     mutationKey,
     scope: mutation.options.scope?.id,
+    lastCorrelationId: mutationCorrelationMap.get(mutation.mutationId),
   };
 }
 
@@ -302,18 +620,37 @@ function sendSnapshot(
     }
 
     const mutations: TanStackMutationInfo[] = [];
+    const activeMutationIds = new Set<number>();
     for (const mutation of mutationCache.getAll()) {
       try {
+        activeMutationIds.add(mutation.mutationId);
         mutations.push(serializeMutation(mutation));
       } catch (error) {
         console.error(`[FloTrace] Error serializing mutation ${mutation.mutationId}:`, error);
       }
     }
 
+    // Clean up tracking maps for mutations no longer in the cache
+    for (const id of mutationPrevStatus.keys()) {
+      if (!activeMutationIds.has(id)) {
+        mutationPrevStatus.delete(id);
+        mutationCorrelationMap.delete(id);
+      }
+    }
+
+    // Flush completed correlations
+    const correlations = completedCorrelations.length > 0
+      ? [...completedCorrelations]
+      : undefined;
+    if (correlations) {
+      completedCorrelations = [];
+    }
+
     client.sendImmediate({
       type: 'runtime:tanstackQuery',
       queries,
       mutations,
+      correlations,
       timestamp: Date.now(),
     });
   } catch (error) {

@@ -81,6 +81,85 @@ export interface Fiber {
 }
 
 /**
+ * Duck-type check: does this object look like a TanStack QueryObserver?
+ * Uses method signatures (getCurrentResult + subscribe) which are stable
+ * across TQ v4 and v5, rather than checking data fields which vary by version.
+ */
+function isLikelyQueryObserver(obj: unknown): obj is Record<string, unknown> {
+  if (obj === null || typeof obj !== 'object') return false;
+  const candidate = obj as Record<string, unknown>;
+  return (
+    typeof candidate.getCurrentResult === 'function' &&
+    typeof candidate.subscribe === 'function'
+  );
+}
+
+/**
+ * Extract queryHash from a confirmed QueryObserver-like object.
+ * Checks multiple locations where TQ stores the hash across versions.
+ */
+function getQueryHashFromObserver(observer: Record<string, unknown>): string | null {
+  // Path 1: observer.options.queryHash (TQ v4/v5 standard)
+  if (observer.options && typeof observer.options === 'object') {
+    const opts = observer.options as Record<string, unknown>;
+    if (typeof opts.queryHash === 'string') return opts.queryHash;
+  }
+  // Path 2: observer.currentQuery.queryHash (TQ v4 internal)
+  if (observer.currentQuery && typeof observer.currentQuery === 'object') {
+    const q = observer.currentQuery as Record<string, unknown>;
+    if (typeof q.queryHash === 'string') return q.queryHash;
+  }
+  // Path 3: direct observer.queryHash (rare)
+  if (typeof observer.queryHash === 'string') return observer.queryHash;
+  return null;
+}
+
+/**
+ * Detect TanStack Query observer instances in a fiber's hook linked list.
+ *
+ * TQ stores QueryObserver in different hooks depending on version:
+ * - v4: `useState(() => new QueryObserver(...))` — observer is memoizedState directly
+ * - v5: `useRef` — observer is in memoizedState.current
+ *
+ * We identify QueryObserver by duck-typing its methods (getCurrentResult, subscribe)
+ * rather than checking data fields, making detection version-independent.
+ * Returns deduplicated array of queryHash strings, or undefined if none found.
+ */
+function detectQueryObserverHashes(fiber: Fiber): string[] | undefined {
+  let hookState = fiber.memoizedState;
+  if (!hookState) return undefined;
+
+  const seen = new Set<string>();
+  let iterations = 0;
+
+  while (hookState && iterations < 100) {
+    iterations++;
+    try {
+      const ms = hookState.memoizedState;
+
+      // Pattern 1: Direct memoizedState is a QueryObserver (TQ v4 useState)
+      if (isLikelyQueryObserver(ms)) {
+        const hash = getQueryHashFromObserver(ms);
+        if (hash) seen.add(hash);
+      }
+      // Pattern 2: useRef — memoizedState = { current: QueryObserver } (TQ v5)
+      else if (ms !== null && typeof ms === 'object' && !Array.isArray(ms)) {
+        const ref = (ms as { current?: unknown }).current;
+        if (isLikelyQueryObserver(ref)) {
+          const hash = getQueryHashFromObserver(ref);
+          if (hash) seen.add(hash);
+        }
+      }
+    } catch {
+      // Skip malformed hooks
+    }
+    hookState = hookState.next as FiberHookState | null;
+  }
+
+  return seen.size > 0 ? Array.from(seen) : undefined;
+}
+
+/**
  * Hook state linked list node from fiber.memoizedState.
  * Each hook call creates one node in this linked list.
  */
@@ -442,6 +521,7 @@ function walkFiber(
             : children;
 
         const framework = isFrameworkComponent(current, name) || undefined;
+        const queryHashes = detectQueryObserverHashes(current);
         nodes.push({
           id: nodeId,
           name,
@@ -454,6 +534,7 @@ function walkFiber(
           lineNumber: current._debugSource?.lineNumber,
           isFramework: framework,
           reactKey: typeof current.key === 'string' ? current.key : undefined,
+          queryHashes,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
