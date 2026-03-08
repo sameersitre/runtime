@@ -39,7 +39,8 @@ export type RuntimeMessage =
   | RuntimeNodeEffectsMessage
   | RuntimeDetailedRenderReasonMessage
   | RuntimeTimelineEventMessage
-  | RuntimeConsoleCaptureMessage;
+  | RuntimeConsoleCaptureMessage
+  | RuntimeTanStackQueryUpdateMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -360,6 +361,51 @@ export interface RuntimeConsoleCaptureMessage {
   timestamp: number;
 }
 
+// ============================================================================
+// TanStack Query Types
+// ============================================================================
+
+/** Serialized query info sent over WebSocket */
+export interface TanStackQueryInfo {
+  queryKey: SerializedValue;
+  queryHash: string;
+  status: 'pending' | 'error' | 'success';
+  fetchStatus: 'idle' | 'fetching' | 'paused';
+  dataUpdatedAt: number;
+  errorUpdatedAt: number;
+  isInvalidated: boolean;
+  isStale: boolean;
+  isActive: boolean;
+  isDisabled: boolean;
+  failureCount: number;
+  errorMessage?: string;
+  observerCount: number;
+  /** Config values */
+  staleTime?: number;
+  gcTime?: number;
+  /** Data shape descriptor (key names + types, no values) */
+  dataShape?: SerializedValue;
+}
+
+/** Serialized mutation info sent over WebSocket */
+export interface TanStackMutationInfo {
+  mutationId: number;
+  status: 'idle' | 'pending' | 'error' | 'success';
+  isPaused: boolean;
+  submittedAt: number;
+  failureCount: number;
+  errorMessage?: string;
+  mutationKey?: SerializedValue;
+  scope?: string;
+}
+
+export interface RuntimeTanStackQueryUpdateMessage {
+  type: 'runtime:tanstackQuery';
+  queries: TanStackQueryInfo[];
+  mutations: TanStackMutationInfo[];
+  timestamp: number;
+}
+
 /**
  * Messages received from extension
  */
@@ -387,6 +433,7 @@ export interface TrackingOptions {
   trackRedux?: boolean;
   trackRouter?: boolean;
   trackContext?: boolean;
+  trackTanstackQuery?: boolean;
   batchSize?: number;
   batchDelayMs?: number;
 }
@@ -417,6 +464,8 @@ export interface FloTraceConfig {
   trackRouter?: boolean;
   /** Track Context (default: true) */
   trackContext?: boolean;
+  /** Track TanStack Query (default: true) */
+  trackTanstackQuery?: boolean;
 }
 
 /**
@@ -434,4 +483,5 @@ export const DEFAULT_CONFIG: Required<FloTraceConfig> = {
   trackRedux: true,
   trackRouter: true,
   trackContext: true,
+  trackTanstackQuery: true,
 };

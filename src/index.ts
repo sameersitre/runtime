@@ -29,6 +29,7 @@ export type {
   HookType, HookInfo, EffectInfo,
   TimelineEventType, TimelineEvent,
   ConsoleLevel, ConsoleCaptureEntry,
+  TanStackQueryInfo, TanStackMutationInfo,
 } from './types';
 
 // Fiber tree walker for advanced usage
@@ -47,6 +48,10 @@ export { installZustandTracker, uninstallZustandTracker } from './zustandTracker
 // Redux store tracker for explicit store registration
 export { installReduxTracker, uninstallReduxTracker, isReduxStore } from './reduxTracker';
 export type { ReduxStoreApi } from './reduxTracker';
+
+// TanStack Query tracker for explicit QueryClient registration
+export { installTanStackQueryTracker, uninstallTanStackQueryTracker, isTanStackQueryClient } from './tanstackQueryTracker';
+export type { TanStackQueryClientApi } from './tanstackQueryTracker';
 
 // Router tracker for automatic URL navigation tracking (History API patching)
 export { installRouterTracker, uninstallRouterTracker } from './routerTracker';

@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -290,6 +290,44 @@ interface RuntimeConsoleCaptureMessage {
     entries: ConsoleCaptureEntry[];
     timestamp: number;
 }
+/** Serialized query info sent over WebSocket */
+interface TanStackQueryInfo {
+    queryKey: SerializedValue;
+    queryHash: string;
+    status: 'pending' | 'error' | 'success';
+    fetchStatus: 'idle' | 'fetching' | 'paused';
+    dataUpdatedAt: number;
+    errorUpdatedAt: number;
+    isInvalidated: boolean;
+    isStale: boolean;
+    isActive: boolean;
+    isDisabled: boolean;
+    failureCount: number;
+    errorMessage?: string;
+    observerCount: number;
+    /** Config values */
+    staleTime?: number;
+    gcTime?: number;
+    /** Data shape descriptor (key names + types, no values) */
+    dataShape?: SerializedValue;
+}
+/** Serialized mutation info sent over WebSocket */
+interface TanStackMutationInfo {
+    mutationId: number;
+    status: 'idle' | 'pending' | 'error' | 'success';
+    isPaused: boolean;
+    submittedAt: number;
+    failureCount: number;
+    errorMessage?: string;
+    mutationKey?: SerializedValue;
+    scope?: string;
+}
+interface RuntimeTanStackQueryUpdateMessage {
+    type: 'runtime:tanstackQuery';
+    queries: TanStackQueryInfo[];
+    mutations: TanStackMutationInfo[];
+    timestamp: number;
+}
 /**
  * Messages received from extension
  */
@@ -337,6 +375,7 @@ interface TrackingOptions {
     trackRedux?: boolean;
     trackRouter?: boolean;
     trackContext?: boolean;
+    trackTanstackQuery?: boolean;
     batchSize?: number;
     batchDelayMs?: number;
 }
@@ -366,6 +405,8 @@ interface FloTraceConfig {
     trackRouter?: boolean;
     /** Track Context (default: true) */
     trackContext?: boolean;
+    /** Track TanStack Query (default: true) */
+    trackTanstackQuery?: boolean;
 }
 /**
  * Default configuration
@@ -485,6 +526,102 @@ declare function installReduxTracker(store: ReduxStoreApi, client: FloTraceWebSo
 declare function uninstallReduxTracker(): void;
 
 /**
+ * TanStack Query Tracker for @flotrace/runtime
+ *
+ * Subscribes to QueryCache and MutationCache events and sends
+ * query/mutation state snapshots to the FloTrace desktop app.
+ *
+ * Design: User passes their QueryClient via the `queryClient` prop on <FloTraceProvider>.
+ * We subscribe via queryClient.getQueryCache().subscribe() and getMutationCache().subscribe().
+ *
+ * Uses duck-typed interface — no @tanstack/react-query dependency needed.
+ * Same pattern as zustandTracker and reduxTracker.
+ */
+
+/** Minimal Query interface — only what we need to read state */
+interface DuckQuery {
+    queryKey: unknown[];
+    queryHash: string;
+    state: {
+        status: 'pending' | 'success' | 'error';
+        fetchStatus: 'idle' | 'fetching' | 'paused';
+        data: unknown;
+        error: unknown;
+        dataUpdatedAt: number;
+        errorUpdatedAt: number;
+        isInvalidated: boolean;
+        fetchFailureCount: number;
+        fetchFailureReason: unknown;
+    };
+    options: {
+        staleTime?: number;
+        gcTime?: number;
+        retry?: number | boolean;
+        refetchInterval?: number | false;
+        refetchOnWindowFocus?: boolean | 'always';
+        refetchOnMount?: boolean | 'always';
+        refetchOnReconnect?: boolean | 'always';
+        networkMode?: 'online' | 'always' | 'offlineFirst';
+        enabled?: boolean;
+        meta?: Record<string, unknown>;
+    };
+    getObserversCount(): number;
+    isStale(): boolean;
+    isActive(): boolean;
+    isDisabled(): boolean;
+}
+/** Minimal Mutation interface */
+interface DuckMutation {
+    mutationId: number;
+    state: {
+        status: 'idle' | 'pending' | 'error' | 'success';
+        isPaused: boolean;
+        submittedAt: number;
+        variables: unknown;
+        error: unknown;
+        failureCount: number;
+    };
+    options: {
+        mutationKey?: unknown[];
+        scope?: {
+            id: string;
+        };
+    };
+}
+/** Minimal QueryCache interface */
+interface DuckQueryCache {
+    getAll(): DuckQuery[];
+    subscribe(cb: (event: {
+        type: string;
+        query?: DuckQuery;
+    }) => void): () => void;
+}
+/** Minimal MutationCache interface */
+interface DuckMutationCache {
+    getAll(): DuckMutation[];
+    subscribe(cb: (event: {
+        type: string;
+        mutation?: DuckMutation;
+    }) => void): () => void;
+}
+/** Duck-typed QueryClient — what we need from the user */
+interface TanStackQueryClientApi {
+    getQueryCache(): DuckQueryCache;
+    getMutationCache(): DuckMutationCache;
+}
+/** Validate that an object looks like a TanStack QueryClient */
+declare function isTanStackQueryClient(obj: unknown): obj is TanStackQueryClientApi;
+/**
+ * Install TanStack Query tracking.
+ * Subscribes to QueryCache and MutationCache and sends runtime:tanstackQuery messages.
+ */
+declare function installTanStackQueryTracker(queryClient: TanStackQueryClientApi, client: FloTraceWebSocketClient): void;
+/**
+ * Uninstall TanStack Query tracking.
+ */
+declare function uninstallTanStackQueryTracker(): void;
+
+/**
  * Context for FloTrace runtime state
  */
 interface FloTraceContextValue {
@@ -532,6 +669,22 @@ interface FloTraceProviderProps {
      * ```
      */
     reduxStore?: ReduxStoreApi;
+    /**
+     * Optional TanStack Query client to track. Query and mutation state
+     * is shown in FloTrace's TanStack Query panel.
+     *
+     * @example
+     * ```tsx
+     * import { queryClient } from './queryClient';
+     *
+     * <FloTraceProvider queryClient={queryClient}>
+     *   <QueryClientProvider client={queryClient}>
+     *     <App />
+     *   </QueryClientProvider>
+     * </FloTraceProvider>
+     * ```
+     */
+    queryClient?: TanStackQueryClientApi;
 }
 /**
  * FloTraceProvider wraps your React app to enable real-time render tracking.
@@ -547,7 +700,7 @@ interface FloTraceProviderProps {
  * );
  * ```
  */
-declare function FloTraceProvider({ children, config, stores, reduxStore }: FloTraceProviderProps): JSX.Element;
+declare function FloTraceProvider({ children, config, stores, reduxStore, queryClient }: FloTraceProviderProps): JSX.Element;
 /**
  * Higher-order component to wrap a component with FloTrace profiling.
  * Use this for targeted profiling of specific components.
@@ -913,4 +1066,4 @@ declare function serializeValue(value: unknown, depth?: number, seen?: WeakSet<o
  */
 declare function serializeProps(props: Record<string, unknown>): Record<string, SerializedValue>;
 
-export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type PropChange, type ReduxStoreApi, type SerializedValue, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installReduxTracker, installRouterTracker, installTimelineTracker, installZustandTracker, isReduxStore, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallReduxTracker, uninstallRouterTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };
+export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type PropChange, type ReduxStoreApi, type SerializedValue, type TanStackMutationInfo, type TanStackQueryClientApi, type TanStackQueryInfo, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installReduxTracker, installRouterTracker, installTanStackQueryTracker, installTimelineTracker, installZustandTracker, isReduxStore, isTanStackQueryClient, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallReduxTracker, uninstallRouterTracker, uninstallTanStackQueryTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };

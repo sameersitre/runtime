@@ -13,7 +13,8 @@ var DEFAULT_CONFIG = {
   trackZustand: true,
   trackRedux: true,
   trackRouter: true,
-  trackContext: true
+  trackContext: true,
+  trackTanstackQuery: true
 };
 
 // src/websocketClient.ts
@@ -808,6 +809,7 @@ function isUserComponent(fiber) {
   const name = getComponentName(fiber);
   if (name === "Anonymous" || name === "Unknown" || name === "ForwardRef" || name === "Memo")
     return false;
+  if (name.startsWith("FloTrace")) return false;
   if (name.startsWith("@") || name.includes("/")) return false;
   if (fiber._debugSource?.fileName?.includes("node_modules")) return false;
   return true;
@@ -1611,16 +1613,198 @@ function sendReduxUpdate(state, changedKeys, client4) {
   }
 }
 
-// src/routerTracker.ts
+// src/tanstackQueryTracker.ts
 var isInstalled5 = false;
+var queryUnsubscribe = null;
+var mutationUnsubscribe = null;
 var debounceTimer3 = null;
+var DEBOUNCE_MS3 = 300;
+function isTanStackQueryClient(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  const candidate = obj;
+  return typeof candidate.getQueryCache === "function" && typeof candidate.getMutationCache === "function";
+}
+function installTanStackQueryTracker(queryClient, client4) {
+  if (isInstalled5) {
+    console.warn("[FloTrace] TanStack Query tracker already installed, reinstalling");
+    uninstallTanStackQueryTracker();
+  }
+  isInstalled5 = true;
+  console.log("[FloTrace] Installing TanStack Query tracker");
+  try {
+    const queryCache = queryClient.getQueryCache();
+    const mutationCache = queryClient.getMutationCache();
+    sendSnapshot(queryCache, mutationCache, client4);
+    queryUnsubscribe = queryCache.subscribe((event) => {
+      try {
+        if (event.type === "added" || event.type === "removed" || event.type === "updated") {
+          scheduleSnapshot(queryCache, mutationCache, client4);
+        }
+      } catch (error) {
+        console.error("[FloTrace] Error in TanStack Query cache subscribe callback:", error);
+      }
+    });
+    mutationUnsubscribe = mutationCache.subscribe(() => {
+      try {
+        scheduleSnapshot(queryCache, mutationCache, client4);
+      } catch (error) {
+        console.error("[FloTrace] Error in TanStack Mutation cache subscribe callback:", error);
+      }
+    });
+  } catch (error) {
+    console.error("[FloTrace] Failed to install TanStack Query tracker:", error);
+    isInstalled5 = false;
+  }
+}
+function uninstallTanStackQueryTracker() {
+  if (!isInstalled5) return;
+  if (debounceTimer3) {
+    clearTimeout(debounceTimer3);
+    debounceTimer3 = null;
+  }
+  if (queryUnsubscribe) {
+    try {
+      queryUnsubscribe();
+    } catch (e) {
+      console.error("[FloTrace] Error unsubscribing from QueryCache:", e);
+    }
+    queryUnsubscribe = null;
+  }
+  if (mutationUnsubscribe) {
+    try {
+      mutationUnsubscribe();
+    } catch (e) {
+      console.error("[FloTrace] Error unsubscribing from MutationCache:", e);
+    }
+    mutationUnsubscribe = null;
+  }
+  isInstalled5 = false;
+  console.log("[FloTrace] TanStack Query tracker uninstalled");
+}
+function scheduleSnapshot(queryCache, mutationCache, client4) {
+  if (debounceTimer3) clearTimeout(debounceTimer3);
+  debounceTimer3 = setTimeout(() => {
+    debounceTimer3 = null;
+    sendSnapshot(queryCache, mutationCache, client4);
+  }, DEBOUNCE_MS3);
+}
+function serializeQueryData(data) {
+  if (data === null || data === void 0) return null;
+  try {
+    return serializeValue(data);
+  } catch {
+    return { __type: "truncated", originalType: typeof data };
+  }
+}
+function serializeQuery(query) {
+  let queryKeySerialized;
+  try {
+    queryKeySerialized = serializeValue(query.queryKey);
+  } catch {
+    queryKeySerialized = "[serialization failed]";
+  }
+  let errorMessage;
+  if (query.state.error) {
+    try {
+      errorMessage = query.state.error instanceof Error ? query.state.error.message : String(query.state.error);
+    } catch {
+      errorMessage = "Unknown error";
+    }
+  }
+  return {
+    queryKey: queryKeySerialized,
+    queryHash: query.queryHash,
+    status: query.state.status,
+    fetchStatus: query.state.fetchStatus,
+    dataUpdatedAt: query.state.dataUpdatedAt,
+    errorUpdatedAt: query.state.errorUpdatedAt,
+    isInvalidated: query.state.isInvalidated,
+    isStale: safeCall(() => query.isStale(), false),
+    isActive: safeCall(() => query.isActive(), false),
+    isDisabled: safeCall(() => query.isDisabled(), false),
+    failureCount: query.state.fetchFailureCount,
+    errorMessage,
+    observerCount: safeCall(() => query.getObserversCount(), 0),
+    staleTime: query.options.staleTime,
+    gcTime: query.options.gcTime,
+    dataShape: serializeQueryData(query.state.data)
+  };
+}
+function serializeMutation(mutation) {
+  let errorMessage;
+  if (mutation.state.error) {
+    try {
+      errorMessage = mutation.state.error instanceof Error ? mutation.state.error.message : String(mutation.state.error);
+    } catch {
+      errorMessage = "Unknown error";
+    }
+  }
+  let mutationKey;
+  if (mutation.options.mutationKey) {
+    try {
+      mutationKey = serializeValue(mutation.options.mutationKey);
+    } catch {
+      mutationKey = "[serialization failed]";
+    }
+  }
+  return {
+    mutationId: mutation.mutationId,
+    status: mutation.state.status,
+    isPaused: mutation.state.isPaused,
+    submittedAt: mutation.state.submittedAt,
+    failureCount: mutation.state.failureCount,
+    errorMessage,
+    mutationKey,
+    scope: mutation.options.scope?.id
+  };
+}
+function sendSnapshot(queryCache, mutationCache, client4) {
+  try {
+    if (!client4.connected) return;
+    const queries = [];
+    for (const query of queryCache.getAll()) {
+      try {
+        queries.push(serializeQuery(query));
+      } catch (error) {
+        console.error(`[FloTrace] Error serializing query "${query.queryHash}":`, error);
+      }
+    }
+    const mutations = [];
+    for (const mutation of mutationCache.getAll()) {
+      try {
+        mutations.push(serializeMutation(mutation));
+      } catch (error) {
+        console.error(`[FloTrace] Error serializing mutation ${mutation.mutationId}:`, error);
+      }
+    }
+    client4.sendImmediate({
+      type: "runtime:tanstackQuery",
+      queries,
+      mutations,
+      timestamp: Date.now()
+    });
+  } catch (error) {
+    console.error("[FloTrace] Error sending TanStack Query snapshot:", error);
+  }
+}
+function safeCall(fn, fallback) {
+  try {
+    return fn();
+  } catch {
+    return fallback;
+  }
+}
+
+// src/routerTracker.ts
+var isInstalled6 = false;
+var debounceTimer4 = null;
 var client2 = null;
 var originalPushState = null;
 var originalReplaceState = null;
 var popstateHandler = null;
-var DEBOUNCE_MS3 = 200;
+var DEBOUNCE_MS4 = 200;
 function installRouterTracker(wsClient) {
-  if (isInstalled5) {
+  if (isInstalled6) {
     console.warn("[FloTrace] Router tracker already installed, reinstalling");
     uninstallRouterTracker();
   }
@@ -1630,7 +1814,7 @@ function installRouterTracker(wsClient) {
   }
   console.log("[FloTrace] Installing router tracker");
   try {
-    isInstalled5 = true;
+    isInstalled6 = true;
     client2 = wsClient;
     originalPushState = history.pushState.bind(history);
     originalReplaceState = history.replaceState.bind(history);
@@ -1668,10 +1852,10 @@ function installRouterTracker(wsClient) {
   }
 }
 function uninstallRouterTracker() {
-  if (!isInstalled5) return;
-  if (debounceTimer3) {
-    clearTimeout(debounceTimer3);
-    debounceTimer3 = null;
+  if (!isInstalled6) return;
+  if (debounceTimer4) {
+    clearTimeout(debounceTimer4);
+    debounceTimer4 = null;
   }
   try {
     if (originalPushState) {
@@ -1698,15 +1882,15 @@ function uninstallRouterTracker() {
     console.error("[FloTrace] Error removing popstate listener:", error);
   }
   client2 = null;
-  isInstalled5 = false;
+  isInstalled6 = false;
   console.log("[FloTrace] Router tracker uninstalled");
 }
 function scheduleRouterUpdate() {
-  if (debounceTimer3) clearTimeout(debounceTimer3);
-  debounceTimer3 = setTimeout(() => {
-    debounceTimer3 = null;
+  if (debounceTimer4) clearTimeout(debounceTimer4);
+  debounceTimer4 = setTimeout(() => {
+    debounceTimer4 = null;
     sendRouterUpdate();
-  }, DEBOUNCE_MS3);
+  }, DEBOUNCE_MS4);
 }
 function sendRouterUpdate() {
   try {
@@ -1739,13 +1923,13 @@ var MAX_ARGS_PER_ENTRY = 10;
 var MAX_BUFFER_SIZE = 300;
 var originals = /* @__PURE__ */ new Map();
 var client3 = null;
-var isInstalled6 = false;
+var isInstalled7 = false;
 var buffer = [];
 var flushTimer2 = null;
 function installConsoleTracker(wsClient) {
-  if (isInstalled6) return;
+  if (isInstalled7) return;
   client3 = wsClient;
-  isInstalled6 = true;
+  isInstalled7 = true;
   for (const method of METHODS) {
     originals.set(method, console[method].bind(console));
     console[method] = (...args) => {
@@ -1756,7 +1940,7 @@ function installConsoleTracker(wsClient) {
   flushTimer2 = setInterval(flushBuffer, FLUSH_INTERVAL_MS2);
 }
 function uninstallConsoleTracker() {
-  if (!isInstalled6) return;
+  if (!isInstalled7) return;
   for (const [method, original] of originals) {
     console[method] = original;
   }
@@ -1768,7 +1952,7 @@ function uninstallConsoleTracker() {
   flushBuffer();
   buffer = [];
   client3 = null;
-  isInstalled6 = false;
+  isInstalled7 = false;
 }
 function captureEntry(level, args) {
   if (args.length > 0 && typeof args[0] === "string" && args[0].startsWith("[FloTrace]")) {
@@ -1857,7 +2041,7 @@ var FloTraceContext = createContext(null);
 function useFloTrace() {
   return useContext(FloTraceContext);
 }
-function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
+function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClient }) {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const [connected, setConnected] = React.useState(false);
   const trackingOptionsRef = useRef({});
@@ -1865,6 +2049,8 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
   storesRef.current = stores;
   const reduxStoreRef = useRef(reduxStore);
   reduxStoreRef.current = reduxStore;
+  const queryClientRef = useRef(queryClient);
+  queryClientRef.current = queryClient;
   useEffect(() => {
     if (!mergedConfig.enabled) {
       return;
@@ -1899,6 +2085,13 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
                 console.error("[FloTrace] Failed to install Redux tracker:", error);
               }
             }
+            if (message.options?.trackTanstackQuery && queryClientRef.current) {
+              try {
+                installTanStackQueryTracker(queryClientRef.current, client4);
+              } catch (error) {
+                console.error("[FloTrace] Failed to install TanStack Query tracker:", error);
+              }
+            }
             if (message.options?.trackRouter) {
               try {
                 installRouterTracker(client4);
@@ -1924,6 +2117,11 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
               uninstallReduxTracker();
             } catch (e) {
               console.error("[FloTrace] Error uninstalling Redux tracker:", e);
+            }
+            try {
+              uninstallTanStackQueryTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error uninstalling TanStack Query tracker:", e);
             }
             try {
               uninstallRouterTracker();
@@ -2069,6 +2267,11 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore }) {
           console.error("[FloTrace] Error during cleanup (reduxTracker):", e);
         }
         try {
+          uninstallTanStackQueryTracker();
+        } catch (e) {
+          console.error("[FloTrace] Error during cleanup (tanstackQueryTracker):", e);
+        }
+        try {
           uninstallRouterTracker();
         } catch (e) {
           console.error("[FloTrace] Error during cleanup (routerTracker):", e);
@@ -2206,9 +2409,11 @@ export {
   installFiberTreeWalker,
   installReduxTracker,
   installRouterTracker,
+  installTanStackQueryTracker,
   installTimelineTracker,
   installZustandTracker,
   isReduxStore,
+  isTanStackQueryClient,
   recordTimelineEvent,
   requestTreeSnapshot,
   serializeProps,
@@ -2217,6 +2422,7 @@ export {
   uninstallFiberTreeWalker,
   uninstallReduxTracker,
   uninstallRouterTracker,
+  uninstallTanStackQueryTracker,
   uninstallTimelineTracker,
   uninstallZustandTracker,
   useFloTrace,

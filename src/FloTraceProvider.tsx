@@ -6,6 +6,7 @@ import { serializeProps, getChangedKeys } from './serializer';
 import { installFiberTreeWalker, uninstallFiberTreeWalker, requestTreeSnapshot, requestFullSnapshot, getNodeProps, getNodeHooks, getNodeEffects, getDetailedRenderReason } from './fiberTreeWalker';
 import { installZustandTracker, uninstallZustandTracker } from './zustandTracker';
 import { installReduxTracker, uninstallReduxTracker, type ReduxStoreApi } from './reduxTracker';
+import { installTanStackQueryTracker, uninstallTanStackQueryTracker, type TanStackQueryClientApi } from './tanstackQueryTracker';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 import { installTimelineTracker, uninstallTimelineTracker, getTimeline } from './timelineTracker';
 import { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
@@ -66,6 +67,22 @@ export interface FloTraceProviderProps {
    * ```
    */
   reduxStore?: ReduxStoreApi;
+  /**
+   * Optional TanStack Query client to track. Query and mutation state
+   * is shown in FloTrace's TanStack Query panel.
+   *
+   * @example
+   * ```tsx
+   * import { queryClient } from './queryClient';
+   *
+   * <FloTraceProvider queryClient={queryClient}>
+   *   <QueryClientProvider client={queryClient}>
+   *     <App />
+   *   </QueryClientProvider>
+   * </FloTraceProvider>
+   * ```
+   */
+  queryClient?: TanStackQueryClientApi;
 }
 
 /**
@@ -82,7 +99,7 @@ export interface FloTraceProviderProps {
  * );
  * ```
  */
-export function FloTraceProvider({ children, config = {}, stores, reduxStore }: FloTraceProviderProps): JSX.Element {
+export function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClient }: FloTraceProviderProps): JSX.Element {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
   const [connected, setConnected] = React.useState(false);
   const trackingOptionsRef = useRef<TrackingOptions>({});
@@ -91,6 +108,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
   storesRef.current = stores;
   const reduxStoreRef = useRef(reduxStore);
   reduxStoreRef.current = reduxStore;
+  const queryClientRef = useRef(queryClient);
+  queryClientRef.current = queryClient;
 
   useEffect(() => {
     if (!mergedConfig.enabled) {
@@ -138,6 +157,13 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
               console.error('[FloTrace] Failed to install Redux tracker:', error);
             }
           }
+          if (message.options?.trackTanstackQuery && queryClientRef.current) {
+            try {
+              installTanStackQueryTracker(queryClientRef.current, client);
+            } catch (error) {
+              console.error('[FloTrace] Failed to install TanStack Query tracker:', error);
+            }
+          }
           if (message.options?.trackRouter) {
             try {
               installRouterTracker(client);
@@ -159,6 +185,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
           // Per-tracker uninstall so one failure doesn't block others
           try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Zustand tracker:', e); }
           try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Redux tracker:', e); }
+          try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling TanStack Query tracker:', e); }
           try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Router tracker:', e); }
           try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Timeline tracker:', e); }
           try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Console tracker:', e); }
@@ -298,6 +325,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore }: 
         try { uninstallFiberTreeWalker(); } catch (e) { console.error('[FloTrace] Error during cleanup (fiberTreeWalker):', e); }
         try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (zustandTracker):', e); }
         try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (reduxTracker):', e); }
+        try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (tanstackQueryTracker):', e); }
         try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (routerTracker):', e); }
         try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (timelineTracker):', e); }
         try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (consoleTracker):', e); }
