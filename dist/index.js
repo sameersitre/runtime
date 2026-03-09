@@ -1740,7 +1740,6 @@ var pendingCorrelations = /* @__PURE__ */ new Map();
 var completedCorrelations = [];
 var mutationPrevStatus = /* @__PURE__ */ new Map();
 var mutationCorrelationMap = /* @__PURE__ */ new Map();
-var cachedQueryCache = null;
 function isTanStackQueryClient(obj) {
   if (!obj || typeof obj !== "object") return false;
   const candidate = obj;
@@ -1756,7 +1755,6 @@ function installTanStackQueryTracker(queryClient, client4) {
   try {
     const queryCache = queryClient.getQueryCache();
     const mutationCache = queryClient.getMutationCache();
-    cachedQueryCache = queryCache;
     for (const query of queryCache.getAll()) {
       if (!queryTracking.has(query.queryHash)) {
         initQueryTracking(query);
@@ -1819,7 +1817,6 @@ function uninstallTanStackQueryTracker() {
     clearTimeout(pending.timeoutId);
   }
   pendingCorrelations.clear();
-  cachedQueryCache = null;
   isInstalled5 = false;
   console.log("[FloTrace] TanStack Query tracker uninstalled");
 }
@@ -2068,11 +2065,19 @@ function sendSnapshot(queryCache, mutationCache, client4) {
       }
     }
     const mutations = [];
+    const activeMutationIds = /* @__PURE__ */ new Set();
     for (const mutation of mutationCache.getAll()) {
       try {
+        activeMutationIds.add(mutation.mutationId);
         mutations.push(serializeMutation(mutation));
       } catch (error) {
         console.error(`[FloTrace] Error serializing mutation ${mutation.mutationId}:`, error);
+      }
+    }
+    for (const id of mutationPrevStatus.keys()) {
+      if (!activeMutationIds.has(id)) {
+        mutationPrevStatus.delete(id);
+        mutationCorrelationMap.delete(id);
       }
     }
     const correlations = completedCorrelations.length > 0 ? [...completedCorrelations] : void 0;
