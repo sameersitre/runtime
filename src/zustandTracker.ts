@@ -14,8 +14,8 @@
  * - Users can control exactly which stores are tracked
  */
 
-import type { SerializedValue } from './types';
-import { serializeValue, getChangedKeys } from './serializer';
+import { getChangedKeys } from './serializer';
+import { serializeStoreState } from './storeUtils';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
 /** Minimal Zustand store interface — only what we need to subscribe */
@@ -152,22 +152,10 @@ function sendStoreUpdate(
   try {
     if (!client.connected) return;
 
-    // Serialize each key individually — per-key try-catch so one bad value
-    // doesn't prevent sending the rest of the store state
-    const serializedState: Record<string, SerializedValue> = {};
-    for (const [key, value] of Object.entries(state)) {
-      try {
-        serializedState[key] = serializeValue(value);
-      } catch (error) {
-        console.error(`[FloTrace] Error serializing Zustand key "${storeName}.${key}":`, error);
-        serializedState[key] = { __type: 'error', value: 'Serialization failed' };
-      }
-    }
-
     client.sendImmediate({
       type: 'runtime:zustand',
       storeName,
-      state: serializedState,
+      state: serializeStoreState(state, `Zustand "${storeName}"`),
       changedKeys,
       timestamp: Date.now(),
     });

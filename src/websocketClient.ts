@@ -22,6 +22,8 @@ export class FloTraceWebSocketClient {
   private reconnectAttempts = 0;
   private static readonly MAX_RECONNECT_ATTEMPTS = 10;
   private static readonly MAX_RECONNECT_INTERVAL = 30_000; // 30s cap
+  private static readonly BATCH_FLUSH_MS = 100; // Flush batched messages every 100ms
+  private static readonly MAX_QUEUE_SIZE = 500; // Prevent unbounded queue growth when disconnected
   private messageHandlers: Set<MessageHandler> = new Set();
   private connectionHandlers: Set<ConnectionHandler> = new Set();
 
@@ -51,7 +53,7 @@ export class FloTraceWebSocketClient {
     this.isConnecting = true;
 
     try {
-      const url = `ws://localhost:${this.config.port}`;
+      const url = `ws://127.0.0.1:${this.config.port}`;
       console.log(`[FloTrace] Connecting to ${url}...`);
 
       this.ws = new WebSocket(url);
@@ -144,11 +146,16 @@ export class FloTraceWebSocketClient {
 
     this.messageQueue.push(message);
 
-    // Schedule flush
+    // Cap queue size to prevent unbounded growth when disconnected
+    if (this.messageQueue.length > FloTraceWebSocketClient.MAX_QUEUE_SIZE) {
+      this.messageQueue = this.messageQueue.slice(-FloTraceWebSocketClient.MAX_QUEUE_SIZE);
+    }
+
+    // Schedule flush with dedicated batch interval (NOT reconnectInterval)
     if (!this.flushTimeout) {
       this.flushTimeout = setTimeout(() => {
         this.flush();
-      }, this.config.reconnectInterval || 100);
+      }, FloTraceWebSocketClient.BATCH_FLUSH_MS);
     }
 
     // Immediate flush if queue is full

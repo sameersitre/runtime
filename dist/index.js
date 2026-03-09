@@ -92,7 +92,7 @@ var _FloTraceWebSocketClient = class _FloTraceWebSocketClient {
     this.reconnectTimeout = null;
     this.isConnecting = false;
     this.reconnectAttempts = 0;
-    // 30s cap
+    // Prevent unbounded queue growth when disconnected
     this.messageHandlers = /* @__PURE__ */ new Set();
     this.connectionHandlers = /* @__PURE__ */ new Set();
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -114,7 +114,7 @@ var _FloTraceWebSocketClient = class _FloTraceWebSocketClient {
     }
     this.isConnecting = true;
     try {
-      const url = `ws://localhost:${this.config.port}`;
+      const url = `ws://127.0.0.1:${this.config.port}`;
       console.log(`[FloTrace] Connecting to ${url}...`);
       this.ws = new WebSocket(url);
       this.ws.onopen = () => {
@@ -189,10 +189,13 @@ var _FloTraceWebSocketClient = class _FloTraceWebSocketClient {
       return;
     }
     this.messageQueue.push(message);
+    if (this.messageQueue.length > _FloTraceWebSocketClient.MAX_QUEUE_SIZE) {
+      this.messageQueue = this.messageQueue.slice(-_FloTraceWebSocketClient.MAX_QUEUE_SIZE);
+    }
     if (!this.flushTimeout) {
       this.flushTimeout = setTimeout(() => {
         this.flush();
-      }, this.config.reconnectInterval || 100);
+      }, _FloTraceWebSocketClient.BATCH_FLUSH_MS);
     }
     if (this.messageQueue.length >= (this.config.trackAllRenders ? 50 : 10)) {
       this.flush();
@@ -318,6 +321,10 @@ var _FloTraceWebSocketClient = class _FloTraceWebSocketClient {
 };
 _FloTraceWebSocketClient.MAX_RECONNECT_ATTEMPTS = 10;
 _FloTraceWebSocketClient.MAX_RECONNECT_INTERVAL = 3e4;
+// 30s cap
+_FloTraceWebSocketClient.BATCH_FLUSH_MS = 100;
+// Flush batched messages every 100ms
+_FloTraceWebSocketClient.MAX_QUEUE_SIZE = 500;
 var FloTraceWebSocketClient = _FloTraceWebSocketClient;
 var clientInstance = null;
 function getWebSocketClient(config) {
@@ -493,14 +500,27 @@ function getChangedKeys(prev, next) {
   return changed;
 }
 
-// src/hookInspector.ts
+// src/fiberConstants.ts
+var HOOK_HAS_EFFECT = 1;
 var HOOK_INSERTION = 2;
 var HOOK_LAYOUT = 4;
 var HOOK_PASSIVE = 8;
+function collectCircularList(lastEffect) {
+  const list = [];
+  let effect = lastEffect.next;
+  if (!effect) return list;
+  do {
+    list.push(effect);
+    effect = effect.next;
+  } while (effect && effect !== lastEffect.next);
+  return list;
+}
+
+// src/hookInspector.ts
 function inspectHooks(fiber) {
   const hooks = [];
   let hookState = fiber.memoizedState;
-  const effects = collectEffectList(fiber);
+  const effects = fiber.updateQueue?.lastEffect ? collectCircularList(fiber.updateQueue.lastEffect) : [];
   let effectIndex = 0;
   const debugTypes = fiber._debugHookTypes ?? null;
   let index = 0;
@@ -629,24 +649,8 @@ function isEffectShape(ms) {
   }
   return false;
 }
-function collectEffectList(fiber) {
-  const effects = [];
-  const lastEffect = fiber.updateQueue?.lastEffect;
-  if (!lastEffect) return effects;
-  let effect = lastEffect.next;
-  if (!effect) return effects;
-  do {
-    effects.push(effect);
-    effect = effect.next;
-  } while (effect && effect !== lastEffect.next);
-  return effects;
-}
 
 // src/effectInspector.ts
-var HOOK_HAS_EFFECT = 1;
-var HOOK_INSERTION2 = 2;
-var HOOK_LAYOUT2 = 4;
-var HOOK_PASSIVE2 = 8;
 function inspectEffects(fiber) {
   const results = [];
   const lastEffect = fiber.updateQueue?.lastEffect;
@@ -658,7 +662,7 @@ function inspectEffects(fiber) {
     try {
       const curr = currEffects[i];
       const prev = prevEffects[i] ?? null;
-      const type = (curr.tag & HOOK_PASSIVE2) !== 0 ? "useEffect" : (curr.tag & HOOK_LAYOUT2) !== 0 ? "useLayoutEffect" : (curr.tag & HOOK_INSERTION2) !== 0 ? "useInsertionEffect" : "useEffect";
+      const type = (curr.tag & HOOK_PASSIVE) !== 0 ? "useEffect" : (curr.tag & HOOK_LAYOUT) !== 0 ? "useLayoutEffect" : (curr.tag & HOOK_INSERTION) !== 0 ? "useInsertionEffect" : "useEffect";
       const willRun = (curr.tag & HOOK_HAS_EFFECT) !== 0;
       const changedDepIndices = diffDeps(prev?.deps ?? null, curr.deps);
       const hasCleanup = typeof curr.destroy === "function";
@@ -686,16 +690,6 @@ function inspectEffects(fiber) {
     }
   }
   return results;
-}
-function collectCircularList(lastEffect) {
-  const list = [];
-  let effect = lastEffect.next;
-  if (!effect) return list;
-  do {
-    list.push(effect);
-    effect = effect.next;
-  } while (effect && effect !== lastEffect.next);
-  return list;
 }
 function buildEffectToHookIndexMap(fiber, effects) {
   const map = /* @__PURE__ */ new Map();
@@ -848,6 +842,14 @@ var hookedRendererID = null;
 var activeStrategy = null;
 var lastSnapshotSentTime = 0;
 var DEVTOOLS_STALE_THRESHOLD_MS = 2e3;
+var debugEnabled = false;
+try {
+  debugEnabled = !!globalThis.__FLOTRACE_DEBUG__;
+} catch {
+}
+function debugLog(...args) {
+  if (debugEnabled) console.log(...args);
+}
 var fiberRefMap = /* @__PURE__ */ new Map();
 function getComponentName(fiber) {
   const type = fiber.type;
@@ -1029,9 +1031,9 @@ function buildTreeFromFiberRoot(root) {
     });
     return null;
   }
-  fiberRefMap = /* @__PURE__ */ new Map();
+  fiberRefMap.clear();
   const topLevelNodes = walkFiber(rootFiber.child, "");
-  console.log(
+  debugLog(
     "[FloTrace] walkFiber found",
     topLevelNodes.length,
     "top-level nodes"
@@ -1056,7 +1058,7 @@ function findFiberRootFromDOM() {
     for (const selector of selectors) {
       const element = document.querySelector(selector);
       if (!element) continue;
-      console.log(
+      debugLog(
         `[FloTrace] Trying selector "${selector}" \u2192 found element`,
         element.tagName,
         element.id
@@ -1064,16 +1066,16 @@ function findFiberRootFromDOM() {
       const reactKeys = Object.keys(element).filter(
         (k) => k.startsWith("__react") || k.startsWith("_react")
       );
-      console.log(`[FloTrace] React keys on element:`, reactKeys);
+      debugLog(`[FloTrace] React keys on element:`, reactKeys);
       const fiberRoot = getFiberRootFromElement(element);
       if (fiberRoot) {
-        console.log("[FloTrace] Found fiber root from selector:", selector);
+        debugLog("[FloTrace] Found fiber root from selector:", selector);
         return fiberRoot;
       }
     }
     const allBodyChildren = document.body?.children;
     if (allBodyChildren) {
-      console.log(
+      debugLog(
         "[FloTrace] Scanning all",
         allBodyChildren.length,
         "body children for React root..."
@@ -1083,7 +1085,7 @@ function findFiberRootFromDOM() {
           (k) => k.startsWith("__react") || k.startsWith("_react")
         );
         if (reactKeys.length > 0) {
-          console.log(
+          debugLog(
             "[FloTrace] React keys on",
             child.tagName,
             child.id || "(no id)",
@@ -1093,7 +1095,7 @@ function findFiberRootFromDOM() {
         }
         const fiberRoot = getFiberRootFromElement(child);
         if (fiberRoot) {
-          console.log(
+          debugLog(
             "[FloTrace] Found fiber root from body child scan:",
             child.tagName,
             child.id || "(no id)"
@@ -1148,7 +1150,7 @@ function sendDebouncedSnapshot(root) {
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
     if (isWalking) {
-      console.log("[FloTrace] Skipped snapshot: already walking");
+      debugLog("[FloTrace] Skipped snapshot: already walking");
       return;
     }
     isWalking = true;
@@ -1176,7 +1178,7 @@ function sendDebouncedSnapshot(root) {
       const currentFlatTree = flattenTree(tree);
       const sendFull = previousFlatTree === null || snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
       if (sendFull) {
-        console.log(
+        debugLog(
           "[FloTrace] Sending FULL tree snapshot, root:",
           tree.name,
           "nodes:",
@@ -1196,7 +1198,7 @@ function sendDebouncedSnapshot(root) {
       } else {
         const diff = computeTreeDiff(previousFlatTree, currentFlatTree);
         if (diff) {
-          console.log(
+          debugLog(
             "[FloTrace] Sending tree diff, seq:",
             diffSeq,
             "added:",
@@ -1217,7 +1219,7 @@ function sendDebouncedSnapshot(root) {
           lastSnapshotSentTime = Date.now();
           diffSeq++;
         } else {
-          console.log("[FloTrace] Tree unchanged, skipping diff");
+          debugLog("[FloTrace] Tree unchanged, skipping diff");
         }
       }
       previousFlatTree = currentFlatTree;
@@ -1280,7 +1282,7 @@ function requestTreeSnapshot() {
   if (activeStrategy === "devtools") {
     const elapsed = Date.now() - lastSnapshotSentTime;
     if (elapsed < DEVTOOLS_STALE_THRESHOLD_MS) return;
-    console.log("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
+    debugLog("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
   }
   const root = findFiberRootFromDOM();
   if (root) {
@@ -1497,6 +1499,20 @@ function uninstallFiberTreeWalker() {
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }
 
+// src/storeUtils.ts
+function serializeStoreState(state, logPrefix) {
+  const serialized = {};
+  for (const [key, value] of Object.entries(state)) {
+    try {
+      serialized[key] = serializeValue(value);
+    } catch (error) {
+      console.error(`[FloTrace] Error serializing ${logPrefix} key "${key}":`, error);
+      serialized[key] = { __type: "error", value: "Serialization failed" };
+    }
+  }
+  return serialized;
+}
+
 // src/zustandTracker.ts
 var activeUnsubscribers = [];
 var isInstalled3 = false;
@@ -1568,19 +1584,10 @@ function scheduleStoreUpdate(storeName, prevState, newState, client4) {
 function sendStoreUpdate(storeName, state, changedKeys, client4) {
   try {
     if (!client4.connected) return;
-    const serializedState = {};
-    for (const [key, value] of Object.entries(state)) {
-      try {
-        serializedState[key] = serializeValue(value);
-      } catch (error) {
-        console.error(`[FloTrace] Error serializing Zustand key "${storeName}.${key}":`, error);
-        serializedState[key] = { __type: "error", value: "Serialization failed" };
-      }
-    }
     client4.sendImmediate({
       type: "runtime:zustand",
       storeName,
-      state: serializedState,
+      state: serializeStoreState(state, `Zustand "${storeName}"`),
       changedKeys,
       timestamp: Date.now()
     });
@@ -1659,18 +1666,9 @@ function scheduleReduxUpdate(newState, client4) {
 function sendReduxUpdate(state, changedKeys, client4) {
   try {
     if (!client4.connected) return;
-    const serializedState = {};
-    for (const [key, value] of Object.entries(state)) {
-      try {
-        serializedState[key] = serializeValue(value);
-      } catch (error) {
-        console.error(`[FloTrace] Error serializing Redux key "${key}":`, error);
-        serializedState[key] = { __type: "error", value: "Serialization failed" };
-      }
-    }
     client4.sendImmediate({
       type: "runtime:redux",
-      state: serializedState,
+      state: serializeStoreState(state, "Redux"),
       changedKeys,
       timestamp: Date.now()
     });

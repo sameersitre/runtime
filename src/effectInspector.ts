@@ -18,11 +18,7 @@
 import type { Fiber, FiberEffect, FiberHookState } from './fiberTreeWalker';
 import type { EffectInfo, SerializedValue } from './types';
 import { serializeValue } from './serializer';
-
-const HOOK_HAS_EFFECT = 0b0001;
-const HOOK_INSERTION = 0b0010;
-const HOOK_LAYOUT = 0b0100;
-const HOOK_PASSIVE = 0b1000;
+import { HOOK_HAS_EFFECT, HOOK_INSERTION, HOOK_LAYOUT, HOOK_PASSIVE, collectCircularList } from './fiberConstants';
 
 /**
  * Inspect all effects in a fiber's updateQueue.
@@ -80,23 +76,6 @@ export function inspectEffects(fiber: Fiber): EffectInfo[] {
   }
 
   return results;
-}
-
-/**
- * Collect effects from a circular linked list into an array.
- * The list is: lastEffect.next → ... → lastEffect (circular).
- */
-function collectCircularList(lastEffect: FiberEffect): FiberEffect[] {
-  const list: FiberEffect[] = [];
-  let effect: FiberEffect | null = lastEffect.next;
-  if (!effect) return list;
-
-  do {
-    list.push(effect!);
-    effect = effect!.next;
-  } while (effect && effect !== lastEffect.next);
-
-  return list;
 }
 
 /**
