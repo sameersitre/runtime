@@ -875,6 +875,7 @@ function isUserComponent(fiber) {
   const name = getComponentName(fiber);
   if (name === "Anonymous" || name === "Unknown" || name === "ForwardRef" || name === "Memo")
     return false;
+  if (name.startsWith("FloTrace")) return false;
   if (name.startsWith("@") || name.includes("/")) return false;
   if (fiber._debugSource?.fileName?.includes("node_modules")) return false;
   return true;
