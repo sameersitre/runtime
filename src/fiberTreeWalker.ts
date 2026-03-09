@@ -264,6 +264,14 @@ let activeStrategy: "devtools" | "dom" | null = null;
 let lastSnapshotSentTime = 0;
 const DEVTOOLS_STALE_THRESHOLD_MS = 2000; // If no DevTools snapshot in 2s, allow DOM fallback
 
+// Debug logging — disabled by default to avoid polluting the user's browser console.
+// Enable via: window.__FLOTRACE_DEBUG__ = true
+let debugEnabled = false;
+try { debugEnabled = !!(globalThis as unknown as { __FLOTRACE_DEBUG__?: boolean }).__FLOTRACE_DEBUG__; } catch { /* SSR safe */ }
+function debugLog(...args: unknown[]): void {
+  if (debugEnabled) console.log(...args);
+}
+
 // Fiber reference cache: nodeId → fiber, rebuilt on every tree walk.
 // Used for on-demand props lookup (getNodeProps) so we don't re-walk the tree.
 // Fiber references stay valid because React reuses fiber objects across renders.
@@ -577,11 +585,11 @@ function buildTreeFromFiberRoot(root: FiberRoot): LiveTreeNode | null {
     return null;
   }
 
-  // Clear fiber reference map before rebuilding
-  fiberRefMap = new Map();
+  // Clear fiber reference map before rebuilding (reuse to reduce GC pressure)
+  fiberRefMap.clear();
 
   const topLevelNodes = walkFiber(rootFiber.child, "");
-  console.log(
+  debugLog(
     "[FloTrace] walkFiber found",
     topLevelNodes.length,
     "top-level nodes",
@@ -623,7 +631,7 @@ function findFiberRootFromDOM(): FiberRoot | null {
       const element = document.querySelector(selector);
       if (!element) continue;
 
-      console.log(
+      debugLog(
         `[FloTrace] Trying selector "${selector}" → found element`,
         element.tagName,
         element.id,
@@ -631,11 +639,11 @@ function findFiberRootFromDOM(): FiberRoot | null {
       const reactKeys = Object.keys(element).filter(
         (k) => k.startsWith("__react") || k.startsWith("_react"),
       );
-      console.log(`[FloTrace] React keys on element:`, reactKeys);
+      debugLog(`[FloTrace] React keys on element:`, reactKeys);
 
       const fiberRoot = getFiberRootFromElement(element);
       if (fiberRoot) {
-        console.log("[FloTrace] Found fiber root from selector:", selector);
+        debugLog("[FloTrace] Found fiber root from selector:", selector);
         return fiberRoot;
       }
     }
@@ -643,7 +651,7 @@ function findFiberRootFromDOM(): FiberRoot | null {
     // Fallback: check ALL direct children of <body>
     const allBodyChildren = document.body?.children;
     if (allBodyChildren) {
-      console.log(
+      debugLog(
         "[FloTrace] Scanning all",
         allBodyChildren.length,
         "body children for React root...",
@@ -653,7 +661,7 @@ function findFiberRootFromDOM(): FiberRoot | null {
           (k) => k.startsWith("__react") || k.startsWith("_react"),
         );
         if (reactKeys.length > 0) {
-          console.log(
+          debugLog(
             "[FloTrace] React keys on",
             child.tagName,
             child.id || "(no id)",
@@ -663,7 +671,7 @@ function findFiberRootFromDOM(): FiberRoot | null {
         }
         const fiberRoot = getFiberRootFromElement(child);
         if (fiberRoot) {
-          console.log(
+          debugLog(
             "[FloTrace] Found fiber root from body child scan:",
             child.tagName,
             child.id || "(no id)",
@@ -761,7 +769,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
     debounceTimer = null;
 
     if (isWalking) {
-      console.log("[FloTrace] Skipped snapshot: already walking");
+      debugLog("[FloTrace] Skipped snapshot: already walking");
       return;
     }
     isWalking = true;
@@ -802,7 +810,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
         snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
 
       if (sendFull) {
-        console.log(
+        debugLog(
           "[FloTrace] Sending FULL tree snapshot, root:",
           tree.name,
           "nodes:",
@@ -823,7 +831,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
         // Compute incremental diff against previous snapshot
         const diff = computeTreeDiff(previousFlatTree!, currentFlatTree);
         if (diff) {
-          console.log(
+          debugLog(
             "[FloTrace] Sending tree diff, seq:",
             diffSeq,
             "added:", diff.added.length,
@@ -842,7 +850,7 @@ function sendDebouncedSnapshot(root: FiberRoot): void {
           diffSeq++;
         } else {
           // Nothing changed — skip sending entirely to save bandwidth
-          console.log("[FloTrace] Tree unchanged, skipping diff");
+          debugLog("[FloTrace] Tree unchanged, skipping diff");
         }
       }
 
@@ -977,7 +985,7 @@ export function requestTreeSnapshot(): void {
   if (activeStrategy === "devtools") {
     const elapsed = Date.now() - lastSnapshotSentTime;
     if (elapsed < DEVTOOLS_STALE_THRESHOLD_MS) return;
-    console.log("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
+    debugLog("[FloTrace] DevTools hook stale (" + elapsed + "ms), falling back to DOM snapshot");
   }
 
   // DOM fallback: find the fiber root from DOM elements

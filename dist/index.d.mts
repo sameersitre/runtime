@@ -487,6 +487,8 @@ declare class FloTraceWebSocketClient {
     private reconnectAttempts;
     private static readonly MAX_RECONNECT_ATTEMPTS;
     private static readonly MAX_RECONNECT_INTERVAL;
+    private static readonly BATCH_FLUSH_MS;
+    private static readonly MAX_QUEUE_SIZE;
     private messageHandlers;
     private connectionHandlers;
     constructor(config?: FloTraceConfig);

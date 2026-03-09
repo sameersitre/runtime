@@ -13,8 +13,8 @@
  * - Redux is a single global store (no multi-store record)
  */
 
-import type { SerializedValue } from './types';
-import { serializeValue, getChangedKeys } from './serializer';
+import { getChangedKeys } from './serializer';
+import { serializeStoreState } from './storeUtils';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
 /** Minimal Redux store interface — only what we need to subscribe */
@@ -145,21 +145,9 @@ function sendReduxUpdate(
   try {
     if (!client.connected) return;
 
-    // Serialize each key individually — per-key try-catch so one bad value
-    // doesn't prevent sending the rest of the store state
-    const serializedState: Record<string, SerializedValue> = {};
-    for (const [key, value] of Object.entries(state)) {
-      try {
-        serializedState[key] = serializeValue(value);
-      } catch (error) {
-        console.error(`[FloTrace] Error serializing Redux key "${key}":`, error);
-        serializedState[key] = { __type: 'error', value: 'Serialization failed' };
-      }
-    }
-
     client.sendImmediate({
       type: 'runtime:redux',
-      state: serializedState,
+      state: serializeStoreState(state, 'Redux'),
       changedKeys,
       timestamp: Date.now(),
     });

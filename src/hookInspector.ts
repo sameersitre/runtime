@@ -18,12 +18,7 @@
 import type { Fiber, FiberHookState, FiberEffect } from './fiberTreeWalker';
 import type { HookInfo, HookType, SerializedValue } from './types';
 import { serializeValue } from './serializer';
-
-// Effect tag bitmask constants (from React's HookFlags)
-const HOOK_HAS_EFFECT = 0b0001;
-const HOOK_INSERTION = 0b0010;
-const HOOK_LAYOUT = 0b0100;
-const HOOK_PASSIVE = 0b1000;
+import { HOOK_HAS_EFFECT, HOOK_INSERTION, HOOK_LAYOUT, HOOK_PASSIVE, collectCircularList } from './fiberConstants';
 
 /**
  * Inspect all hooks in a fiber's memoizedState linked list.
@@ -34,7 +29,9 @@ export function inspectHooks(fiber: Fiber): HookInfo[] {
   let hookState: FiberHookState | null = fiber.memoizedState;
 
   // Collect effects from updateQueue for matching effect hooks
-  const effects = collectEffectList(fiber);
+  const effects = fiber.updateQueue?.lastEffect
+    ? collectCircularList(fiber.updateQueue.lastEffect)
+    : [];
   let effectIndex = 0;
 
   // Get debug hook types if available (dev builds)
@@ -233,21 +230,3 @@ function isEffectShape(ms: unknown): boolean {
   return false;
 }
 
-/**
- * Collect effects from the fiber's updateQueue circular linked list into an array.
- */
-function collectEffectList(fiber: Fiber): FiberEffect[] {
-  const effects: FiberEffect[] = [];
-  const lastEffect = fiber.updateQueue?.lastEffect;
-  if (!lastEffect) return effects;
-
-  let effect: FiberEffect | null = lastEffect.next;
-  if (!effect) return effects;
-
-  do {
-    effects.push(effect!);
-    effect = effect!.next;
-  } while (effect && effect !== lastEffect.next);
-
-  return effects;
-}
