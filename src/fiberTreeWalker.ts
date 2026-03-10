@@ -249,14 +249,20 @@ declare global {
 const MAX_TREE_DEPTH = 100; // Max nesting depth of user components
 const MAX_CHILDREN_PER_NODE = 300; // Max children per user component node
 
-// Debounce timer for tree snapshot sending.
+// Throttle state for tree snapshot sending.
 // Uses adaptive rate: small trees get frequent snapshots, large trees get
 // throttled to avoid blocking the user's app main thread with walkFiber() + JSON.stringify().
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-const DEBOUNCE_MS_SMALL = 200; // < 50 components → 5 snapshots/sec
-const DEBOUNCE_MS_MEDIUM = 500; // 50-200 components → 2 snapshots/sec
-const DEBOUNCE_MS_LARGE = 1000; // 200+ components → 1 snapshot/sec
-let currentDebounceMs = DEBOUNCE_MS_SMALL; // Starts fast, adapts after first snapshot
+// Unlike a simple debounce, this guarantees snapshots fire within maxWait even during
+// rapid React commits (e.g., Next.js hydration replacing Skeleton → real content).
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+let maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
+const INTERVAL_MS_SMALL = 200; // < 50 components → 5 snapshots/sec
+const INTERVAL_MS_MEDIUM = 500; // 50-200 components → 2 snapshots/sec
+const INTERVAL_MS_LARGE = 1000; // 200+ components → 1 snapshot/sec
+let snapshotIntervalMs = INTERVAL_MS_SMALL; // Starts fast, adapts after first snapshot
+
+// Cache the last-seen FiberRoot so requestFullSnapshot() can actively trigger a walk
+let cachedFiberRoot: FiberRoot | null = null;
 
 // Track whether we're currently walking (to avoid recursive/concurrent walks)
 let isWalking = false;
@@ -556,6 +562,49 @@ function walkFiber(
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
+      } else if (tag === FIBER_TAGS.SuspenseComponent) {
+        // Suspense boundary: only walk the VISIBLE subtree.
+        // Structure: SuspenseComponent → child(primary OffscreenComponent) → sibling(fallback)
+        // When memoizedState === null → resolved (primary visible, fallback hidden)
+        // When memoizedState !== null → showing fallback (primary hidden)
+        const primary = current.child;
+        if (current.memoizedState === null && primary) {
+          // Resolved: walk primary OffscreenComponent's children (real content)
+          const childNodes = walkFiber(
+            primary.child,
+            parentId,
+            nameCountMap,
+            depth,
+          );
+          nodes.push(...childNodes);
+        } else if (primary?.sibling) {
+          // Fallback: skip hidden primary, walk fallback content only
+          const childNodes = walkFiber(
+            primary.sibling,
+            parentId,
+            nameCountMap,
+            depth,
+          );
+          nodes.push(...childNodes);
+        } else {
+          debugLog("[FloTrace] SuspenseComponent has no walkable children");
+        }
+      } else if (tag === FIBER_TAGS.OffscreenComponent) {
+        // React 18+ OffscreenComponent: wraps Suspense primary/fallback content.
+        // When memoizedState is non-null, this subtree is HIDDEN (e.g., a resolved
+        // Suspense fallback that React keeps around for future use). Skip hidden
+        // subtrees to avoid showing stale Skeleton components alongside real content.
+        if (current.memoizedState === null) {
+          const childNodes = walkFiber(
+            current.child,
+            parentId,
+            nameCountMap,
+            depth,
+          );
+          nodes.push(...childNodes);
+        } else {
+          debugLog("[FloTrace] Skipping hidden OffscreenComponent subtree");
+        }
       } else {
         // For transparent wrappers (host components, fragments, providers, etc.):
         // skip the node itself but walk children — user components may be nested inside.
@@ -760,119 +809,159 @@ function getFiberRootFromElement(element: Element): FiberRoot | null {
 // ============================================================================
 
 /**
- * Send a tree snapshot with adaptive debounce based on tree size.
- *
- * Small trees (< 50 nodes) → 200ms debounce (5/sec)
- * Medium trees (50-200 nodes) → 500ms debounce (2/sec)
- * Large trees (200+ nodes) → 1000ms debounce (1/sec)
- *
- * The debounce interval is recalculated after every snapshot based on the
- * actual node count from fiberRefMap.size. This prevents large apps from
- * spending too much main-thread time in walkFiber() + JSON.stringify().
+ * Adapt the snapshot interval based on the current tree size.
+ * Called after each walk so the next throttle window matches tree complexity.
  */
-function sendDebouncedSnapshot(root: FiberRoot): void {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
+function adaptSnapshotInterval(nodeCount: number): void {
+  if (nodeCount >= 200) {
+    snapshotIntervalMs = INTERVAL_MS_LARGE;
+  } else if (nodeCount >= 50) {
+    snapshotIntervalMs = INTERVAL_MS_MEDIUM;
+  } else {
+    snapshotIntervalMs = INTERVAL_MS_SMALL;
   }
+}
 
-  debounceTimer = setTimeout(() => {
-    debounceTimer = null;
+/**
+ * Execute the actual tree walk + send logic (extracted for reuse by throttle).
+ * Walks the fiber tree from the given root, computes a full snapshot or
+ * incremental diff, and sends it over WebSocket.
+ *
+ * Side effects: updates previousFlatTree, snapshotCounter, diffSeq,
+ * snapshotIntervalMs, lastSnapshotSentTime, isWalking, fiberRefMap.
+ */
+function executeSnapshot(root: FiberRoot): void {
+  if (isWalking) {
+    debugLog("[FloTrace] Skipped snapshot: already walking");
+    return;
+  }
+  isWalking = true;
 
-    if (isWalking) {
-      debugLog("[FloTrace] Skipped snapshot: already walking");
+  try {
+    const tree = buildTreeFromFiberRoot(root);
+    if (!tree) {
+      console.warn("[FloTrace] buildTreeFromFiberRoot returned null");
       return;
     }
-    isWalking = true;
 
-    try {
-      const tree = buildTreeFromFiberRoot(root);
-      if (!tree) {
-        console.warn("[FloTrace] buildTreeFromFiberRoot returned null");
-        return;
-      }
+    // Adapt interval for next snapshot based on current tree size.
+    // fiberRefMap is populated during buildTreeFromFiberRoot → walkFiber().
+    const nodeCount = fiberRefMap.size;
+    adaptSnapshotInterval(nodeCount);
 
-      // Adapt debounce for next snapshot based on current tree size.
-      // fiberRefMap is populated during buildTreeFromFiberRoot → walkFiber().
-      const nodeCount = fiberRefMap.size;
-      if (nodeCount >= 200) {
-        currentDebounceMs = DEBOUNCE_MS_LARGE;
-      } else if (nodeCount >= 50) {
-        currentDebounceMs = DEBOUNCE_MS_MEDIUM;
-      } else {
-        currentDebounceMs = DEBOUNCE_MS_SMALL;
-      }
+    const client = getWebSocketClient();
+    if (!client.connected) {
+      console.warn(
+        "[FloTrace] WebSocket not connected, cannot send tree snapshot",
+      );
+      return;
+    }
 
-      const client = getWebSocketClient();
-      if (!client.connected) {
-        console.warn(
-          "[FloTrace] WebSocket not connected, cannot send tree snapshot",
-        );
-        return;
-      }
+    const currentFlatTree = flattenTree(tree);
 
-      // Flatten the current tree for diff computation
-      const currentFlatTree = flattenTree(tree);
+    // Full snapshot when: first time, forced reset, or every Nth snapshot to prevent drift
+    const sendFull =
+      previousFlatTree === null ||
+      snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
 
-      // Decide: full snapshot or incremental diff?
-      // Full snapshot when: first time, forced reset, or every Nth snapshot to prevent drift
-      const sendFull =
-        previousFlatTree === null ||
-        snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
-
-      if (sendFull) {
+    if (sendFull) {
+      debugLog(
+        "[FloTrace] Sending FULL tree snapshot, root:",
+        tree.name,
+        "nodes:",
+        nodeCount,
+        "seq:", snapshotCounter,
+        "nextInterval:",
+        snapshotIntervalMs + "ms",
+      );
+      client.sendImmediate({
+        type: "runtime:treeSnapshot",
+        tree,
+        timestamp: Date.now(),
+      });
+      lastSnapshotSentTime = Date.now();
+      diffSeq = 0;
+    } else {
+      const diff = computeTreeDiff(previousFlatTree!, currentFlatTree);
+      if (diff) {
         debugLog(
-          "[FloTrace] Sending FULL tree snapshot, root:",
-          tree.name,
-          "nodes:",
-          nodeCount,
-          "seq:", snapshotCounter,
-          "nextDebounce:",
-          currentDebounceMs + "ms",
+          "[FloTrace] Sending tree diff, seq:",
+          diffSeq,
+          "added:", diff.added.length,
+          "removed:", diff.removed.length,
+          "updated:", diff.updated.length,
         );
         client.sendImmediate({
-          type: "runtime:treeSnapshot",
-          tree,
+          type: "runtime:treeDiff",
+          seq: diffSeq,
+          added: diff.added,
+          removed: diff.removed,
+          updated: diff.updated,
           timestamp: Date.now(),
         });
         lastSnapshotSentTime = Date.now();
-        // Reset diff sequence on full snapshot
-        diffSeq = 0;
+        diffSeq++;
       } else {
-        // Compute incremental diff against previous snapshot
-        const diff = computeTreeDiff(previousFlatTree!, currentFlatTree);
-        if (diff) {
-          debugLog(
-            "[FloTrace] Sending tree diff, seq:",
-            diffSeq,
-            "added:", diff.added.length,
-            "removed:", diff.removed.length,
-            "updated:", diff.updated.length,
-          );
-          client.sendImmediate({
-            type: "runtime:treeDiff",
-            seq: diffSeq,
-            added: diff.added,
-            removed: diff.removed,
-            updated: diff.updated,
-            timestamp: Date.now(),
-          });
-          lastSnapshotSentTime = Date.now();
-          diffSeq++;
-        } else {
-          // Nothing changed — skip sending entirely to save bandwidth
-          debugLog("[FloTrace] Tree unchanged, skipping diff");
-        }
+        debugLog("[FloTrace] Tree unchanged, skipping diff");
       }
-
-      // Cache current tree for next diff computation
-      previousFlatTree = currentFlatTree;
-      snapshotCounter++;
-    } catch (error) {
-      console.error("[FloTrace] Error walking fiber tree:", error);
-    } finally {
-      isWalking = false;
     }
-  }, currentDebounceMs);
+
+    previousFlatTree = currentFlatTree;
+    snapshotCounter++;
+  } catch (error) {
+    console.error("[FloTrace] Error walking fiber tree:", error);
+  } finally {
+    isWalking = false;
+  }
+}
+
+/**
+ * Schedule a tree snapshot with adaptive throttle based on tree size.
+ *
+ * Small trees (< 50 nodes) → 200ms interval (5 snapshots/sec)
+ * Medium trees (50-200 nodes) → 500ms interval (2 snapshots/sec)
+ * Large trees (200+ nodes) → 1000ms interval (1 snapshot/sec)
+ *
+ * Uses throttle-with-trailing + maxWait guarantee:
+ * - Trailing: waits for silence (like debounce) to batch rapid commits
+ * - MaxWait: guarantees a snapshot fires within 2× the interval, even during
+ *   continuous rapid commits (e.g., Next.js hydration, Suspense streaming).
+ *   This prevents the "stuck on skeleton" bug where trailing-only debounce
+ *   starves snapshots because each new commit keeps resetting the timer.
+ */
+function scheduleSnapshot(root: FiberRoot): void {
+  cachedFiberRoot = root;
+
+  // Reset trailing timer on each call (standard debounce behavior)
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+  }
+
+  throttleTimer = setTimeout(() => {
+    throttleTimer = null;
+    if (maxWaitTimer) {
+      clearTimeout(maxWaitTimer);
+      maxWaitTimer = null;
+    }
+    executeSnapshot(cachedFiberRoot!);
+  }, snapshotIntervalMs);
+
+  // MaxWait guarantee: if no trailing timer has fired within 2× interval,
+  // force-fire to prevent starvation during rapid commits.
+  // Uses cachedFiberRoot (not closure root) to always walk the latest tree.
+  if (!maxWaitTimer) {
+    maxWaitTimer = setTimeout(() => {
+      maxWaitTimer = null;
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      debugLog("[FloTrace] MaxWait forced snapshot (rapid commits detected)");
+      if (cachedFiberRoot) {
+        executeSnapshot(cachedFiberRoot);
+      }
+    }, snapshotIntervalMs * 2);
+  }
 }
 
 // ============================================================================
@@ -1001,19 +1090,23 @@ export function requestTreeSnapshot(): void {
   // DOM fallback: find the fiber root from DOM elements
   const root = findFiberRootFromDOM();
   if (root) {
-    sendDebouncedSnapshot(root);
+    scheduleSnapshot(root);
   }
 }
 
 /**
  * Force the next snapshot to be a full tree (not a diff).
  * Called when the extension detects a sequence gap or on explicit refresh.
- * Resets diff state so the next sendDebouncedSnapshot sends runtime:treeSnapshot.
+ * Resets diff state so the next scheduleSnapshot sends runtime:treeSnapshot.
  */
 export function requestFullSnapshot(): void {
   previousFlatTree = null;
   snapshotCounter = 0;
   diffSeq = 0;
+  // Actively trigger a snapshot using cached root (don't wait for next commit)
+  if (cachedFiberRoot) {
+    scheduleSnapshot(cachedFiberRoot);
+  }
 }
 
 /**
@@ -1101,7 +1194,7 @@ export function installFiberTreeWalker(): () => void {
         // Never let cascade analysis break the fiber tree walker
       }
 
-      sendDebouncedSnapshot(root);
+      scheduleSnapshot(root);
     };
 
     activeStrategy = "devtools";
@@ -1114,7 +1207,7 @@ export function installFiberTreeWalker(): () => void {
       try {
         const root = findFiberRootFromDOM();
         if (root) {
-          sendDebouncedSnapshot(root);
+          scheduleSnapshot(root);
         }
       } catch (error) {
         console.error('[FloTrace] Error sending initial DevTools snapshot:', error);
@@ -1132,7 +1225,7 @@ export function installFiberTreeWalker(): () => void {
       try {
         const root = findFiberRootFromDOM();
         if (root) {
-          sendDebouncedSnapshot(root);
+          scheduleSnapshot(root);
         }
       } catch (error) {
         console.error('[FloTrace] Error sending initial DOM fallback snapshot:', error);
@@ -1333,10 +1426,15 @@ export function getFiberRefMap(): Map<string, Fiber> {
 export function uninstallFiberTreeWalker(): void {
   if (!isInstalled) return;
 
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+    throttleTimer = null;
   }
+  if (maxWaitTimer) {
+    clearTimeout(maxWaitTimer);
+    maxWaitTimer = null;
+  }
+  cachedFiberRoot = null;
 
   // Restore DevTools hook if we wrapped it
   if (activeStrategy === "devtools" && typeof window !== "undefined") {

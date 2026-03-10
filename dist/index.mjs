@@ -1299,11 +1299,13 @@ function detectQueryObserverHashes(fiber) {
 }
 var MAX_TREE_DEPTH = 100;
 var MAX_CHILDREN_PER_NODE = 300;
-var debounceTimer = null;
-var DEBOUNCE_MS_SMALL = 200;
-var DEBOUNCE_MS_MEDIUM = 500;
-var DEBOUNCE_MS_LARGE = 1e3;
-var currentDebounceMs = DEBOUNCE_MS_SMALL;
+var throttleTimer = null;
+var maxWaitTimer = null;
+var INTERVAL_MS_SMALL = 200;
+var INTERVAL_MS_MEDIUM = 500;
+var INTERVAL_MS_LARGE = 1e3;
+var snapshotIntervalMs = INTERVAL_MS_SMALL;
+var cachedFiberRoot = null;
 var isWalking = false;
 var originalOnCommitFiberRoot = null;
 var isInstalled2 = false;
@@ -1477,6 +1479,39 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           queryHashes
         });
       } else if (tag === FIBER_TAGS.HostText) {
+      } else if (tag === FIBER_TAGS.SuspenseComponent) {
+        const primary = current.child;
+        if (current.memoizedState === null && primary) {
+          const childNodes = walkFiber(
+            primary.child,
+            parentId,
+            nameCountMap,
+            depth
+          );
+          nodes.push(...childNodes);
+        } else if (primary?.sibling) {
+          const childNodes = walkFiber(
+            primary.sibling,
+            parentId,
+            nameCountMap,
+            depth
+          );
+          nodes.push(...childNodes);
+        } else {
+          debugLog("[FloTrace] SuspenseComponent has no walkable children");
+        }
+      } else if (tag === FIBER_TAGS.OffscreenComponent) {
+        if (current.memoizedState === null) {
+          const childNodes = walkFiber(
+            current.child,
+            parentId,
+            nameCountMap,
+            depth
+          );
+          nodes.push(...childNodes);
+        } else {
+          debugLog("[FloTrace] Skipping hidden OffscreenComponent subtree");
+        }
       } else {
         const childNodes = walkFiber(
           current.child,
@@ -1614,93 +1649,117 @@ function getFiberRootFromElement(element) {
   }
   return null;
 }
-function sendDebouncedSnapshot(root) {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
+function adaptSnapshotInterval(nodeCount) {
+  if (nodeCount >= 200) {
+    snapshotIntervalMs = INTERVAL_MS_LARGE;
+  } else if (nodeCount >= 50) {
+    snapshotIntervalMs = INTERVAL_MS_MEDIUM;
+  } else {
+    snapshotIntervalMs = INTERVAL_MS_SMALL;
   }
-  debounceTimer = setTimeout(() => {
-    debounceTimer = null;
-    if (isWalking) {
-      debugLog("[FloTrace] Skipped snapshot: already walking");
+}
+function executeSnapshot(root) {
+  if (isWalking) {
+    debugLog("[FloTrace] Skipped snapshot: already walking");
+    return;
+  }
+  isWalking = true;
+  try {
+    const tree = buildTreeFromFiberRoot(root);
+    if (!tree) {
+      console.warn("[FloTrace] buildTreeFromFiberRoot returned null");
       return;
     }
-    isWalking = true;
-    try {
-      const tree = buildTreeFromFiberRoot(root);
-      if (!tree) {
-        console.warn("[FloTrace] buildTreeFromFiberRoot returned null");
-        return;
-      }
-      const nodeCount = fiberRefMap.size;
-      if (nodeCount >= 200) {
-        currentDebounceMs = DEBOUNCE_MS_LARGE;
-      } else if (nodeCount >= 50) {
-        currentDebounceMs = DEBOUNCE_MS_MEDIUM;
-      } else {
-        currentDebounceMs = DEBOUNCE_MS_SMALL;
-      }
-      const client4 = getWebSocketClient();
-      if (!client4.connected) {
-        console.warn(
-          "[FloTrace] WebSocket not connected, cannot send tree snapshot"
-        );
-        return;
-      }
-      const currentFlatTree = flattenTree(tree);
-      const sendFull = previousFlatTree === null || snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
-      if (sendFull) {
+    const nodeCount = fiberRefMap.size;
+    adaptSnapshotInterval(nodeCount);
+    const client4 = getWebSocketClient();
+    if (!client4.connected) {
+      console.warn(
+        "[FloTrace] WebSocket not connected, cannot send tree snapshot"
+      );
+      return;
+    }
+    const currentFlatTree = flattenTree(tree);
+    const sendFull = previousFlatTree === null || snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
+    if (sendFull) {
+      debugLog(
+        "[FloTrace] Sending FULL tree snapshot, root:",
+        tree.name,
+        "nodes:",
+        nodeCount,
+        "seq:",
+        snapshotCounter,
+        "nextInterval:",
+        snapshotIntervalMs + "ms"
+      );
+      client4.sendImmediate({
+        type: "runtime:treeSnapshot",
+        tree,
+        timestamp: Date.now()
+      });
+      lastSnapshotSentTime = Date.now();
+      diffSeq = 0;
+    } else {
+      const diff = computeTreeDiff(previousFlatTree, currentFlatTree);
+      if (diff) {
         debugLog(
-          "[FloTrace] Sending FULL tree snapshot, root:",
-          tree.name,
-          "nodes:",
-          nodeCount,
-          "seq:",
-          snapshotCounter,
-          "nextDebounce:",
-          currentDebounceMs + "ms"
+          "[FloTrace] Sending tree diff, seq:",
+          diffSeq,
+          "added:",
+          diff.added.length,
+          "removed:",
+          diff.removed.length,
+          "updated:",
+          diff.updated.length
         );
         client4.sendImmediate({
-          type: "runtime:treeSnapshot",
-          tree,
+          type: "runtime:treeDiff",
+          seq: diffSeq,
+          added: diff.added,
+          removed: diff.removed,
+          updated: diff.updated,
           timestamp: Date.now()
         });
         lastSnapshotSentTime = Date.now();
-        diffSeq = 0;
+        diffSeq++;
       } else {
-        const diff = computeTreeDiff(previousFlatTree, currentFlatTree);
-        if (diff) {
-          debugLog(
-            "[FloTrace] Sending tree diff, seq:",
-            diffSeq,
-            "added:",
-            diff.added.length,
-            "removed:",
-            diff.removed.length,
-            "updated:",
-            diff.updated.length
-          );
-          client4.sendImmediate({
-            type: "runtime:treeDiff",
-            seq: diffSeq,
-            added: diff.added,
-            removed: diff.removed,
-            updated: diff.updated,
-            timestamp: Date.now()
-          });
-          lastSnapshotSentTime = Date.now();
-          diffSeq++;
-        } else {
-          debugLog("[FloTrace] Tree unchanged, skipping diff");
-        }
+        debugLog("[FloTrace] Tree unchanged, skipping diff");
       }
-      previousFlatTree = currentFlatTree;
-      snapshotCounter++;
-    } catch (error) {
-      console.error("[FloTrace] Error walking fiber tree:", error);
-    } finally {
-      isWalking = false;
     }
-  }, currentDebounceMs);
+    previousFlatTree = currentFlatTree;
+    snapshotCounter++;
+  } catch (error) {
+    console.error("[FloTrace] Error walking fiber tree:", error);
+  } finally {
+    isWalking = false;
+  }
+}
+function scheduleSnapshot(root) {
+  cachedFiberRoot = root;
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+  }
+  throttleTimer = setTimeout(() => {
+    throttleTimer = null;
+    if (maxWaitTimer) {
+      clearTimeout(maxWaitTimer);
+      maxWaitTimer = null;
+    }
+    executeSnapshot(cachedFiberRoot);
+  }, snapshotIntervalMs);
+  if (!maxWaitTimer) {
+    maxWaitTimer = setTimeout(() => {
+      maxWaitTimer = null;
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      debugLog("[FloTrace] MaxWait forced snapshot (rapid commits detected)");
+      if (cachedFiberRoot) {
+        executeSnapshot(cachedFiberRoot);
+      }
+    }, snapshotIntervalMs * 2);
+  }
 }
 var previousFlatTree = null;
 var diffSeq = 0;
@@ -1757,13 +1816,16 @@ function requestTreeSnapshot() {
   }
   const root = findFiberRootFromDOM();
   if (root) {
-    sendDebouncedSnapshot(root);
+    scheduleSnapshot(root);
   }
 }
 function requestFullSnapshot() {
   previousFlatTree = null;
   snapshotCounter = 0;
   diffSeq = 0;
+  if (cachedFiberRoot) {
+    scheduleSnapshot(cachedFiberRoot);
+  }
 }
 function installFiberTreeWalker() {
   if (isInstalled2) {
@@ -1812,7 +1874,7 @@ function installFiberTreeWalker() {
         }
       } catch {
       }
-      sendDebouncedSnapshot(root);
+      scheduleSnapshot(root);
     };
     activeStrategy = "devtools";
     console.log(
@@ -1822,7 +1884,7 @@ function installFiberTreeWalker() {
       try {
         const root = findFiberRootFromDOM();
         if (root) {
-          sendDebouncedSnapshot(root);
+          scheduleSnapshot(root);
         }
       } catch (error) {
         console.error("[FloTrace] Error sending initial DevTools snapshot:", error);
@@ -1837,7 +1899,7 @@ function installFiberTreeWalker() {
       try {
         const root = findFiberRootFromDOM();
         if (root) {
-          sendDebouncedSnapshot(root);
+          scheduleSnapshot(root);
         }
       } catch (error) {
         console.error("[FloTrace] Error sending initial DOM fallback snapshot:", error);
@@ -1960,10 +2022,15 @@ function getFiberRefMap() {
 }
 function uninstallFiberTreeWalker() {
   if (!isInstalled2) return;
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
+  if (throttleTimer) {
+    clearTimeout(throttleTimer);
+    throttleTimer = null;
   }
+  if (maxWaitTimer) {
+    clearTimeout(maxWaitTimer);
+    maxWaitTimer = null;
+  }
+  cachedFiberRoot = null;
   if (activeStrategy === "devtools" && typeof window !== "undefined") {
     const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
     if (hook) {
@@ -2086,7 +2153,7 @@ function sendStoreUpdate(storeName, state, changedKeys, client4) {
 // src/reduxTracker.ts
 var activeUnsubscribe = null;
 var isInstalled4 = false;
-var debounceTimer2 = null;
+var debounceTimer = null;
 var previousState = null;
 var DEBOUNCE_MS2 = 200;
 function isReduxStore(obj) {
@@ -2118,9 +2185,9 @@ function installReduxTracker(store, client4) {
 }
 function uninstallReduxTracker() {
   if (!isInstalled4) return;
-  if (debounceTimer2) {
-    clearTimeout(debounceTimer2);
-    debounceTimer2 = null;
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
   }
   if (activeUnsubscribe) {
     try {
@@ -2144,9 +2211,9 @@ function scheduleReduxUpdate(newState, client4) {
   }
   if (changedKeys.length === 0) return;
   previousState = newState;
-  if (debounceTimer2) clearTimeout(debounceTimer2);
-  debounceTimer2 = setTimeout(() => {
-    debounceTimer2 = null;
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
     sendReduxUpdate(newState, changedKeys, client4);
   }, DEBOUNCE_MS2);
 }
@@ -2168,7 +2235,7 @@ function sendReduxUpdate(state, changedKeys, client4) {
 var isInstalled5 = false;
 var queryUnsubscribe = null;
 var mutationUnsubscribe = null;
-var debounceTimer3 = null;
+var debounceTimer2 = null;
 var DEBOUNCE_MS3 = 300;
 var MAX_EVENTS_PER_QUERY = 50;
 var queryTracking = /* @__PURE__ */ new Map();
@@ -2209,7 +2276,7 @@ function installTanStackQueryTracker(queryClient, client4) {
           if (event.query) {
             updateQueryTracking(event.query, event.type);
           }
-          scheduleSnapshot(queryCache, mutationCache, client4);
+          scheduleSnapshot2(queryCache, mutationCache, client4);
         }
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Query cache subscribe callback:", error);
@@ -2220,7 +2287,7 @@ function installTanStackQueryTracker(queryClient, client4) {
         if (event.mutation) {
           updateMutationTracking(event.mutation, queryCache, mutationCache, client4);
         }
-        scheduleSnapshot(queryCache, mutationCache, client4);
+        scheduleSnapshot2(queryCache, mutationCache, client4);
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Mutation cache subscribe callback:", error);
       }
@@ -2232,9 +2299,9 @@ function installTanStackQueryTracker(queryClient, client4) {
 }
 function uninstallTanStackQueryTracker() {
   if (!isInstalled5) return;
-  if (debounceTimer3) {
-    clearTimeout(debounceTimer3);
-    debounceTimer3 = null;
+  if (debounceTimer2) {
+    clearTimeout(debounceTimer2);
+    debounceTimer2 = null;
   }
   if (queryUnsubscribe) {
     try {
@@ -2397,7 +2464,7 @@ function resolveCorrelation(correlationId, queryCache, mutationCache, client4) {
   if (completedCorrelations.length > MAX_COMPLETED_CORRELATIONS) {
     completedCorrelations = completedCorrelations.slice(-MAX_COMPLETED_CORRELATIONS);
   }
-  scheduleSnapshot(queryCache, mutationCache, client4);
+  scheduleSnapshot2(queryCache, mutationCache, client4);
 }
 function updateMutationTracking(mutation, queryCache, mutationCache, client4) {
   const currentStatus = mutation.state.status;
@@ -2407,10 +2474,10 @@ function updateMutationTracking(mutation, queryCache, mutationCache, client4) {
     openCorrelationWindow(mutation, queryCache, mutationCache, client4);
   }
 }
-function scheduleSnapshot(queryCache, mutationCache, client4) {
-  if (debounceTimer3) clearTimeout(debounceTimer3);
-  debounceTimer3 = setTimeout(() => {
-    debounceTimer3 = null;
+function scheduleSnapshot2(queryCache, mutationCache, client4) {
+  if (debounceTimer2) clearTimeout(debounceTimer2);
+  debounceTimer2 = setTimeout(() => {
+    debounceTimer2 = null;
     sendSnapshot(queryCache, mutationCache, client4);
   }, DEBOUNCE_MS3);
 }
@@ -2544,7 +2611,7 @@ function safeCall(fn, fallback) {
 
 // src/routerTracker.ts
 var isInstalled6 = false;
-var debounceTimer4 = null;
+var debounceTimer3 = null;
 var client2 = null;
 var originalPushState = null;
 var originalReplaceState = null;
@@ -2600,9 +2667,9 @@ function installRouterTracker(wsClient) {
 }
 function uninstallRouterTracker() {
   if (!isInstalled6) return;
-  if (debounceTimer4) {
-    clearTimeout(debounceTimer4);
-    debounceTimer4 = null;
+  if (debounceTimer3) {
+    clearTimeout(debounceTimer3);
+    debounceTimer3 = null;
   }
   try {
     if (originalPushState) {
@@ -2633,9 +2700,9 @@ function uninstallRouterTracker() {
   console.log("[FloTrace] Router tracker uninstalled");
 }
 function scheduleRouterUpdate() {
-  if (debounceTimer4) clearTimeout(debounceTimer4);
-  debounceTimer4 = setTimeout(() => {
-    debounceTimer4 = null;
+  if (debounceTimer3) clearTimeout(debounceTimer3);
+  debounceTimer3 = setTimeout(() => {
+    debounceTimer3 = null;
     sendRouterUpdate();
   }, DEBOUNCE_MS4);
 }
@@ -2807,8 +2874,12 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
       pendingCleanupTimer = null;
     }
     const client4 = getWebSocketClient(mergedConfig);
+    installFiberTreeWalker();
     const unsubConnection = client4.onConnectionChange((isConnected) => {
       setConnected(isConnected);
+      if (isConnected) {
+        requestFullSnapshot();
+      }
     });
     const unsubMessage = client4.onMessage((message) => {
       try {
@@ -2889,7 +2960,6 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             break;
           case "ext:startTreeTracking":
             installFiberTreeWalker();
-            console.log("[FloTrace] Tree tracking started");
             break;
           case "ext:stopTreeTracking":
             uninstallFiberTreeWalker();

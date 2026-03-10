@@ -127,9 +127,22 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
 
     const client = getWebSocketClient(mergedConfig);
 
+    // Install fiber tree walker EAGERLY — before WebSocket connects.
+    // This hooks onCommitFiberRoot immediately so no React commits are missed
+    // during the window between page load and ext:startTreeTracking arriving.
+    // Without this, Suspense resolution commits can be missed if they happen
+    // before the server responds, causing skeletons to persist.
+    installFiberTreeWalker();
+
     // Handle connection state changes
     const unsubConnection = client.onConnectionChange((isConnected) => {
       setConnected(isConnected);
+      // On (re)connect, trigger a full snapshot to recover from any snapshots
+      // dropped while disconnected (e.g., hard refresh race condition where
+      // React commits before WebSocket connects)
+      if (isConnected) {
+        requestFullSnapshot();
+      }
     });
 
     // Handle messages from extension
@@ -193,8 +206,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           break;
 
         case 'ext:startTreeTracking':
+          // Walker already installed eagerly on mount — ensure it's running
           installFiberTreeWalker();
-          console.log('[FloTrace] Tree tracking started');
           break;
 
         case 'ext:stopTreeTracking':
