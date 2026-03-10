@@ -40,7 +40,9 @@ export type RuntimeMessage =
   | RuntimeDetailedRenderReasonMessage
   | RuntimeTimelineEventMessage
   | RuntimeConsoleCaptureMessage
-  | RuntimeTanStackQueryUpdateMessage;
+  | RuntimeTanStackQueryUpdateMessage
+  | RuntimeRenderTriggerMessage
+  | RuntimeRenderCascadeMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -464,6 +466,86 @@ export interface RuntimeTanStackQueryUpdateMessage {
   /** New correlation events since last snapshot */
   correlations?: MutationCorrelation[];
   timestamp: number;
+}
+
+// ============================================================================
+// Render Cascade & Call Stack Tracing Types
+// ============================================================================
+
+export interface StackFrame {
+  functionName: string | null;
+  fileName: string | null;
+  lineNumber: number | null;
+  columnNumber: number | null;
+  /** false for node_modules / react-dom / react-reconciler frames */
+  isUserCode: boolean;
+}
+
+export interface TriggerRecord {
+  triggerId: string;
+  fiberId: string;
+  componentName: string;
+  hookIndex: number;
+  hookType: 'state' | 'reducer' | 'setState' | 'forceUpdate';
+  stack: StackFrame[];
+  timestamp: number;
+  action: SerializedValue | null;
+  batchId: string | null;
+}
+
+export type CascadeReason =
+  | 'state-update'
+  | 'context-update'
+  | 'props-changed'
+  | 'parent-cascade'
+  | 'force-update'
+  | 'bailed-out';
+
+export interface CascadeNode {
+  nodeId: string;
+  componentName: string;
+  reason: CascadeReason;
+  renderDuration: number;
+  subtreeDuration: number;
+  changedProps?: string[];
+  hookIndex?: number;
+  triggerId?: string;
+  children: CascadeNode[];
+  depth: number;
+  isMemoized: boolean;
+}
+
+export type LanePriority =
+  | 'sync' | 'discrete' | 'continuous' | 'default'
+  | 'transition' | 'deferred' | 'idle' | 'offscreen';
+
+export interface LaneInfo {
+  priority: LanePriority;
+  lanes: number;
+  isTransition: boolean;
+  isBlocking: boolean;
+}
+
+export interface CascadeRecord {
+  commitId: string;
+  timestamp: number;
+  totalDuration: number;
+  totalComponents: number;
+  avoidableCount: number;
+  avoidableDuration: number;
+  rootCauses: CascadeNode[];
+  lane: LaneInfo;
+  triggerIds: string[];
+}
+
+export interface RuntimeRenderTriggerMessage {
+  type: 'runtime:renderTrigger';
+  trigger: TriggerRecord;
+}
+
+export interface RuntimeRenderCascadeMessage {
+  type: 'runtime:renderCascade';
+  cascade: CascadeRecord;
 }
 
 /**

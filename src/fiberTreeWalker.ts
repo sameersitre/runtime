@@ -18,6 +18,8 @@ import { getWebSocketClient } from "./websocketClient";
 import { inspectHooks } from "./hookInspector";
 import { inspectEffects } from "./effectInspector";
 import { recordTimelineEvent } from "./timelineTracker";
+import { wrapFiberDispatchers, peekTriggers, clearTriggers } from "./dispatchWrapper";
+import { analyzeCascade } from "./cascadeAnalyzer";
 export type { SerializedValue };
 
 // React fiber tag constants (from React source: ReactWorkTags.js)
@@ -72,6 +74,10 @@ export interface Fiber {
   updateQueue: FiberUpdateQueue | null;
   /** Fiber flags (for detecting force updates, etc.) */
   flags: number;
+  /** Pending work lanes on this fiber */
+  lanes: number;
+  /** Pending work lanes on this fiber's subtree */
+  childLanes: number;
   /** Element type (used for context detection) */
   elementType: unknown;
   /** Context dependencies (React 18+) */
@@ -190,6 +196,10 @@ export interface FiberEffect {
 
 interface FiberUpdateQueue {
   lastEffect: FiberEffect | null;
+  /** Class component update queue — pending updates linked list */
+  shared?: { pending?: unknown };
+  /** Lane bits for this queue */
+  lanes?: number;
 }
 
 interface FiberDependencies {
@@ -1060,6 +1070,36 @@ export function installFiberTreeWalker(): () => void {
 
       // Only track the first renderer
       if (rendererID !== hookedRendererID) return;
+
+      // --- Render Cascade & Call Stack Tracing ---
+      // Run synchronously at commit time (before debounce) so we have fiber.alternate
+      // available for cascade classification and accurate trigger correlation.
+      try {
+        const client = getWebSocketClient();
+        if (client.connected) {
+          const triggers = peekTriggers();
+
+          // Emit each pending trigger record first
+          for (const trigger of triggers) {
+            client.sendImmediate({ type: 'runtime:renderTrigger', trigger });
+          }
+
+          // Analyze cascade and emit if non-trivial
+          const cascade = analyzeCascade(root, triggers);
+          if (cascade) {
+            client.sendImmediate({ type: 'runtime:renderCascade', cascade });
+          }
+
+          // Re-wrap dispatchers for the next render cycle (React creates new
+          // dispatch functions after each commit for function components)
+          wrapFiberDispatchers(root);
+
+          // Clear triggers — they've been attributed to this commit
+          clearTriggers();
+        }
+      } catch {
+        // Never let cascade analysis break the fiber tree walker
+      }
 
       sendDebouncedSnapshot(root);
     };

@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -385,6 +385,65 @@ interface RuntimeTanStackQueryUpdateMessage {
     /** New correlation events since last snapshot */
     correlations?: MutationCorrelation[];
     timestamp: number;
+}
+interface StackFrame {
+    functionName: string | null;
+    fileName: string | null;
+    lineNumber: number | null;
+    columnNumber: number | null;
+    /** false for node_modules / react-dom / react-reconciler frames */
+    isUserCode: boolean;
+}
+interface TriggerRecord {
+    triggerId: string;
+    fiberId: string;
+    componentName: string;
+    hookIndex: number;
+    hookType: 'state' | 'reducer' | 'setState' | 'forceUpdate';
+    stack: StackFrame[];
+    timestamp: number;
+    action: SerializedValue | null;
+    batchId: string | null;
+}
+type CascadeReason = 'state-update' | 'context-update' | 'props-changed' | 'parent-cascade' | 'force-update' | 'bailed-out';
+interface CascadeNode {
+    nodeId: string;
+    componentName: string;
+    reason: CascadeReason;
+    renderDuration: number;
+    subtreeDuration: number;
+    changedProps?: string[];
+    hookIndex?: number;
+    triggerId?: string;
+    children: CascadeNode[];
+    depth: number;
+    isMemoized: boolean;
+}
+type LanePriority = 'sync' | 'discrete' | 'continuous' | 'default' | 'transition' | 'deferred' | 'idle' | 'offscreen';
+interface LaneInfo {
+    priority: LanePriority;
+    lanes: number;
+    isTransition: boolean;
+    isBlocking: boolean;
+}
+interface CascadeRecord {
+    commitId: string;
+    timestamp: number;
+    totalDuration: number;
+    totalComponents: number;
+    avoidableCount: number;
+    avoidableDuration: number;
+    rootCauses: CascadeNode[];
+    lane: LaneInfo;
+    triggerIds: string[];
+}
+interface RuntimeRenderTriggerMessage {
+    type: 'runtime:renderTrigger';
+    trigger: TriggerRecord;
+}
+interface RuntimeRenderCascadeMessage {
+    type: 'runtime:renderCascade';
+    cascade: CascadeRecord;
 }
 /**
  * Messages received from extension
@@ -829,6 +888,10 @@ interface Fiber {
     updateQueue: FiberUpdateQueue | null;
     /** Fiber flags (for detecting force updates, etc.) */
     flags: number;
+    /** Pending work lanes on this fiber */
+    lanes: number;
+    /** Pending work lanes on this fiber's subtree */
+    childLanes: number;
     /** Element type (used for context detection) */
     elementType: unknown;
     /** Context dependencies (React 18+) */
@@ -865,6 +928,12 @@ interface FiberEffect {
 }
 interface FiberUpdateQueue {
     lastEffect: FiberEffect | null;
+    /** Class component update queue — pending updates linked list */
+    shared?: {
+        pending?: unknown;
+    };
+    /** Lane bits for this queue */
+    lanes?: number;
 }
 interface FiberDependencies {
     firstContext: FiberContextDependency | null;

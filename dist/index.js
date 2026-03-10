@@ -799,6 +799,499 @@ function flushPendingEvents() {
   pendingEvents = [];
 }
 
+// src/fiberUtils.ts
+function getFiberDisplayName(type) {
+  if (!type) return "Unknown";
+  if (typeof type === "function") {
+    return type.displayName || type.name || "Anonymous";
+  }
+  if (typeof type === "object") {
+    const t = type;
+    return t.type?.displayName || t.type?.name || t.render?.name || t.displayName || t.name || "Unknown";
+  }
+  return "Unknown";
+}
+
+// src/dispatchWrapper.ts
+var MAX_TRIGGERS = 200;
+var triggerBuffer = [];
+var triggerSeq = 0;
+var wrappedDispatchers = /* @__PURE__ */ new WeakSet();
+var currentBatchId = null;
+function nextBatchId() {
+  if (!currentBatchId) {
+    currentBatchId = String(Date.now()) + "-" + (Math.random() * 65535 | 0).toString(16);
+    queueMicrotask(() => {
+      currentBatchId = null;
+    });
+  }
+  return currentBatchId;
+}
+function nextTriggerId() {
+  return "tr-" + (++triggerSeq).toString(36);
+}
+var STACK_DEPTH_LIMIT = 15;
+var NOISE_PATTERNS = [
+  "node_modules",
+  "react-dom",
+  "react-reconciler",
+  "@flotrace/runtime",
+  "flotrace/runtime",
+  "/runtime/src/",
+  "webpack-internal",
+  "webpack/bootstrap",
+  "<anonymous>"
+];
+function isUserCodeFrame(fileName) {
+  if (!fileName) return false;
+  for (const pattern of NOISE_PATTERNS) {
+    if (fileName.includes(pattern)) return false;
+  }
+  return true;
+}
+function captureStack() {
+  const frames = [];
+  try {
+    const originalPrepare = Error.prepareStackTrace;
+    Error.prepareStackTrace = (_err, callSites) => {
+      for (const site of callSites) {
+        if (frames.length >= STACK_DEPTH_LIMIT) break;
+        const fileName = site.getFileName();
+        frames.push({
+          functionName: site.getFunctionName() ?? site.getMethodName(),
+          fileName,
+          lineNumber: site.getLineNumber(),
+          columnNumber: site.getColumnNumber(),
+          isUserCode: isUserCodeFrame(fileName)
+        });
+      }
+      return "";
+    };
+    const err = new Error();
+    void err.stack;
+    Error.prepareStackTrace = originalPrepare;
+  } catch {
+    try {
+      const raw = new Error().stack ?? "";
+      const lines = raw.split("\n").slice(1);
+      for (const line of lines) {
+        if (frames.length >= STACK_DEPTH_LIMIT) break;
+        const match = line.match(/^\s+at (?:(.+?) \()?(.+?):(\d+):(\d+)\)?$/);
+        if (match) {
+          const fileName = match[2] ?? null;
+          frames.push({
+            functionName: match[1] ?? null,
+            fileName,
+            lineNumber: match[3] ? parseInt(match[3], 10) : null,
+            columnNumber: match[4] ? parseInt(match[4], 10) : null,
+            isUserCode: isUserCodeFrame(fileName)
+          });
+        }
+      }
+    } catch {
+    }
+  }
+  return frames;
+}
+var FIBER_TAG_FUNCTION = 0;
+var FIBER_TAG_CLASS = 1;
+var FIBER_TAG_FORWARD = 11;
+var FIBER_TAG_MEMO = 14;
+var FIBER_TAG_SIMPLEMEMO = 15;
+function getComponentName(fiber) {
+  return getFiberDisplayName(fiber.type);
+}
+function wrapFunctionComponentDispatchers(fiber) {
+  let hookNode = fiber.memoizedState;
+  let hookIndex = 0;
+  while (hookNode && hookIndex < 100) {
+    try {
+      const queue = hookNode.queue;
+      if (queue && typeof queue.dispatch === "function") {
+        const original = queue.dispatch;
+        if (!wrappedDispatchers.has(original)) {
+          const componentName = getComponentName(fiber);
+          const fiberId = getFiberId(fiber);
+          const capturedHookIndex = hookIndex;
+          const hookType = typeof queue.lastRenderedReducer === "function" && queue.lastRenderedReducer?.toString().includes("action") ? "reducer" : "state";
+          const wrapped = function dispatchWithCapture(action) {
+            try {
+              const stack = captureStack();
+              const record = {
+                triggerId: nextTriggerId(),
+                fiberId,
+                componentName,
+                hookIndex: capturedHookIndex,
+                hookType,
+                stack,
+                timestamp: performance.now(),
+                action: serializeValue(action, 2),
+                batchId: nextBatchId()
+              };
+              addTrigger(record);
+            } catch {
+            }
+            return original(action);
+          };
+          wrappedDispatchers.add(wrapped);
+          queue.dispatch = wrapped;
+        }
+      }
+    } catch {
+    }
+    hookNode = hookNode.next;
+    hookIndex++;
+  }
+}
+function wrapClassComponentInstance(fiber) {
+  const instance = fiber.stateNode;
+  if (!instance || instance.__ftWrapped) return;
+  const componentName = getComponentName(fiber);
+  const fiberId = getFiberId(fiber);
+  if (typeof instance.setState === "function") {
+    const origSetState = instance.setState;
+    instance.setState = function wrappedSetState(updater, callback) {
+      try {
+        const stack = captureStack();
+        addTrigger({
+          triggerId: nextTriggerId(),
+          fiberId,
+          componentName,
+          hookIndex: 0,
+          hookType: "setState",
+          stack,
+          timestamp: performance.now(),
+          action: serializeValue(updater, 2),
+          batchId: nextBatchId()
+        });
+      } catch {
+      }
+      return origSetState.call(this, updater, callback);
+    };
+  }
+  if (typeof instance.forceUpdate === "function") {
+    const origForceUpdate = instance.forceUpdate;
+    instance.forceUpdate = function wrappedForceUpdate(callback) {
+      try {
+        const stack = captureStack();
+        addTrigger({
+          triggerId: nextTriggerId(),
+          fiberId,
+          componentName,
+          hookIndex: 0,
+          hookType: "forceUpdate",
+          stack,
+          timestamp: performance.now(),
+          action: null,
+          batchId: nextBatchId()
+        });
+      } catch {
+      }
+      return origForceUpdate.call(this, callback);
+    };
+  }
+  instance.__ftWrapped = true;
+}
+var fiberIds = /* @__PURE__ */ new WeakMap();
+var fiberIdSeq = 0;
+function getFiberId(fiber) {
+  let id = fiberIds.get(fiber);
+  if (!id) {
+    id = getComponentName(fiber) + "-" + (++fiberIdSeq).toString(36);
+    fiberIds.set(fiber, id);
+  }
+  return id;
+}
+function addTrigger(record) {
+  if (triggerBuffer.length >= MAX_TRIGGERS) {
+    triggerBuffer.shift();
+  }
+  triggerBuffer.push(record);
+}
+function wrapFiberDispatchers(root) {
+  try {
+    walkAndWrap(root.current);
+  } catch {
+  }
+}
+function walkAndWrap(rootFiber) {
+  if (!rootFiber) return;
+  const stack = [rootFiber];
+  while (stack.length > 0) {
+    const fiber = stack.pop();
+    try {
+      const tag = fiber.tag;
+      if (tag === FIBER_TAG_FUNCTION || tag === FIBER_TAG_FORWARD || tag === FIBER_TAG_MEMO || tag === FIBER_TAG_SIMPLEMEMO) {
+        wrapFunctionComponentDispatchers(fiber);
+      } else if (tag === FIBER_TAG_CLASS) {
+        wrapClassComponentInstance(fiber);
+      }
+    } catch {
+    }
+    if (fiber.sibling) stack.push(fiber.sibling);
+    if (fiber.child) stack.push(fiber.child);
+  }
+}
+function peekTriggers() {
+  return triggerBuffer;
+}
+function clearTriggers() {
+  triggerBuffer.length = 0;
+}
+
+// src/laneDetector.ts
+var SyncHydrationLane = 1;
+var SyncLane = 2;
+var InputContinuousHydrationLane = 4;
+var InputContinuousLane = 8;
+var DefaultHydrationLane = 16;
+var DefaultLane = 32;
+var TransitionLanes = 4194240;
+var RetryLanes = 62914560;
+var SelectiveHydrationLane = 67108864;
+var IdleHydrationLane = 134217728;
+var IdleLane = 268435456;
+var OffscreenLane = 536870912;
+function classifyLanes(lanes) {
+  try {
+    if (lanes & SyncHydrationLane || lanes & SyncLane) {
+      return { priority: "sync", lanes, isTransition: false, isBlocking: true };
+    }
+    if (lanes & InputContinuousHydrationLane || lanes & InputContinuousLane) {
+      return { priority: "discrete", lanes, isTransition: false, isBlocking: true };
+    }
+    if (lanes & DefaultHydrationLane || lanes & DefaultLane) {
+      return { priority: "default", lanes, isTransition: false, isBlocking: false };
+    }
+    if (lanes & TransitionLanes) {
+      return { priority: "transition", lanes, isTransition: true, isBlocking: false };
+    }
+    if (lanes & RetryLanes || lanes & SelectiveHydrationLane) {
+      return { priority: "deferred", lanes, isTransition: false, isBlocking: false };
+    }
+    if (lanes & IdleHydrationLane || lanes & IdleLane) {
+      return { priority: "idle", lanes, isTransition: false, isBlocking: false };
+    }
+    if (lanes & OffscreenLane) {
+      return { priority: "offscreen", lanes, isTransition: false, isBlocking: false };
+    }
+  } catch {
+  }
+  return { priority: "default", lanes, isTransition: false, isBlocking: false };
+}
+function getFinishedLanes(root) {
+  try {
+    return root.finishedLanes ?? root.pendingLanes ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+// src/cascadeAnalyzer.ts
+var PerformedWork = 1;
+var ForceUpdateFlag = 256;
+var FunctionComponent = 0;
+var ClassComponent = 1;
+var ForwardRef = 11;
+var MemoComponent = 14;
+var SimpleMemoComponent = 15;
+var USER_TAGS = /* @__PURE__ */ new Set([FunctionComponent, ClassComponent, ForwardRef, MemoComponent, SimpleMemoComponent]);
+function isMemoizedFiber(fiber) {
+  return fiber.tag === MemoComponent || fiber.tag === SimpleMemoComponent;
+}
+function propsChanged(prev, next) {
+  if (prev === next) return false;
+  if (!prev || !next) return true;
+  const prevKeys = Object.keys(prev);
+  const nextKeys = Object.keys(next);
+  if (prevKeys.length !== nextKeys.length) return true;
+  for (const key of nextKeys) {
+    if (key === "children") continue;
+    if (prev[key] !== next[key]) return true;
+  }
+  return false;
+}
+function getChangedPropKeys(prev, next) {
+  if (!prev || !next) return [];
+  const changed = [];
+  const allKeys = /* @__PURE__ */ new Set([...Object.keys(prev), ...Object.keys(next)]);
+  for (const key of allKeys) {
+    if (key === "children") continue;
+    if (prev[key] !== next[key]) changed.push(key);
+  }
+  return changed;
+}
+function hadOwnUpdate(fiber) {
+  try {
+    const uq = fiber.updateQueue;
+    if (!uq) return false;
+    if (uq.shared && uq.shared.pending != null) return true;
+    if (fiber.lanes !== 0) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+function hadContextUpdate(fiber) {
+  try {
+    return !!fiber.dependencies?.firstContext;
+  } catch {
+    return false;
+  }
+}
+function classifyFiber(fiber, didRender, parentRerendered) {
+  if (!didRender) {
+    if (fiber.alternate && isMemoizedFiber(fiber)) return "bailed-out";
+    return null;
+  }
+  if (fiber.flags & ForceUpdateFlag) return "force-update";
+  if (hadContextUpdate(fiber)) return "context-update";
+  if (hadOwnUpdate(fiber)) return "state-update";
+  if (parentRerendered) {
+    const alt = fiber.alternate;
+    if (alt && propsChanged(alt.memoizedProps, fiber.memoizedProps)) {
+      return "props-changed";
+    }
+    return "parent-cascade";
+  }
+  return "state-update";
+}
+function computeSubtreeDuration(node) {
+  let total = node.renderDuration;
+  for (const child of node.children) {
+    total += computeSubtreeDuration(child);
+  }
+  node.subtreeDuration = total;
+  return total;
+}
+var commitIdSeq = 0;
+function nextCommitId() {
+  return "c-" + (++commitIdSeq).toString(36) + "-" + (Date.now() % 1e5).toString(36);
+}
+function buildCascadeTree(rootFiber, triggers) {
+  const rootCauses = [];
+  let totalComponents = 0;
+  let avoidableCount = 0;
+  let avoidableDuration = 0;
+  const triggerByName = /* @__PURE__ */ new Map();
+  for (const t of triggers) {
+    if (!triggerByName.has(t.componentName)) {
+      triggerByName.set(t.componentName, t);
+    }
+  }
+  const stack = [{
+    fiber: rootFiber,
+    depth: 0,
+    parentRerendered: false,
+    parentNode: null,
+    isRoot: true
+  }];
+  while (stack.length > 0) {
+    const entry = stack.pop();
+    const { fiber, depth, parentRerendered, parentNode, isRoot } = entry;
+    if (!fiber) continue;
+    if (depth > 150) continue;
+    const didRender = !!(fiber.flags & PerformedWork);
+    const isNewMount = !fiber.alternate;
+    if (isNewMount && !didRender) {
+      let child2 = fiber.child;
+      while (child2) {
+        stack.push({ fiber: child2, depth: depth + 1, parentRerendered: false, parentNode, isRoot: false });
+        child2 = child2.sibling;
+      }
+      continue;
+    }
+    if (!USER_TAGS.has(fiber.tag)) {
+      let child2 = fiber.child;
+      while (child2) {
+        stack.push({ fiber: child2, depth: depth + 1, parentRerendered: didRender || parentRerendered, parentNode, isRoot: false });
+        child2 = child2.sibling;
+      }
+      continue;
+    }
+    const reason = classifyFiber(fiber, didRender, parentRerendered);
+    if (reason === null) {
+      let child2 = fiber.child;
+      while (child2) {
+        stack.push({ fiber: child2, depth: depth + 1, parentRerendered: false, parentNode, isRoot: false });
+        child2 = child2.sibling;
+      }
+      continue;
+    }
+    const componentName = getFiberDisplayName(fiber.type);
+    const renderDuration = fiber.actualDuration ?? 0;
+    let changedProps;
+    if (reason === "props-changed" && fiber.alternate) {
+      changedProps = getChangedPropKeys(fiber.alternate.memoizedProps, fiber.memoizedProps);
+    }
+    let triggerId;
+    if (reason === "state-update" || reason === "context-update" || reason === "force-update") {
+      triggerId = triggerByName.get(componentName)?.triggerId;
+    }
+    const node = {
+      nodeId: componentName + "-" + depth + "-" + totalComponents,
+      componentName,
+      reason,
+      renderDuration,
+      subtreeDuration: renderDuration,
+      // will be updated from children
+      changedProps,
+      triggerId,
+      children: [],
+      depth,
+      isMemoized: isMemoizedFiber(fiber)
+    };
+    totalComponents++;
+    if (reason === "parent-cascade") {
+      avoidableCount++;
+      avoidableDuration += renderDuration;
+    }
+    if (parentNode) {
+      parentNode.children.push(node);
+    } else if (reason === "state-update" || reason === "context-update" || reason === "force-update" || isRoot) {
+      rootCauses.push(node);
+    } else if (parentRerendered) {
+      rootCauses.push(node);
+    }
+    let child = fiber.child;
+    while (child) {
+      stack.push({
+        fiber: child,
+        depth: depth + 1,
+        parentRerendered: didRender,
+        parentNode: reason !== "bailed-out" ? node : parentNode,
+        isRoot: false
+      });
+      child = child.sibling;
+    }
+  }
+  for (const root of rootCauses) computeSubtreeDuration(root);
+  return { rootCauses, totalComponents, avoidableCount, avoidableDuration };
+}
+function analyzeCascade(root, triggers) {
+  try {
+    const finishedLanes = getFinishedLanes(root);
+    const lane = classifyLanes(finishedLanes);
+    const { rootCauses, totalComponents, avoidableCount, avoidableDuration } = buildCascadeTree(root.current, triggers);
+    if (totalComponents === 0) return null;
+    const totalDuration = rootCauses.reduce((sum, n) => sum + n.subtreeDuration, 0);
+    const triggerIds = triggers.map((t) => t.triggerId);
+    return {
+      commitId: nextCommitId(),
+      timestamp: performance.now(),
+      totalDuration,
+      totalComponents,
+      avoidableCount,
+      avoidableDuration,
+      rootCauses,
+      lane,
+      triggerIds
+    };
+  } catch {
+    return null;
+  }
+}
+
 // src/fiberTreeWalker.ts
 var FIBER_TAGS = {
   FunctionComponent: 0,
@@ -897,7 +1390,7 @@ function debugLog(...args) {
   if (debugEnabled) console.log(...args);
 }
 var fiberRefMap = /* @__PURE__ */ new Map();
-function getComponentName(fiber) {
+function getComponentName2(fiber) {
   const type = fiber.type;
   if (!type) return "Unknown";
   if (typeof type === "function") {
@@ -920,7 +1413,7 @@ function getComponentName(fiber) {
 }
 function isUserComponent(fiber) {
   if (!USER_COMPONENT_TAGS.has(fiber.tag)) return false;
-  const name = getComponentName(fiber);
+  const name = getComponentName2(fiber);
   if (name === "Anonymous" || name === "Unknown" || name === "ForwardRef" || name === "Memo")
     return false;
   if (name.startsWith("FloTrace")) return false;
@@ -1016,7 +1509,7 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
     try {
       const tag = current.tag;
       if (isUserComponent(current)) {
-        const name = getComponentName(current);
+        const name = getComponentName2(current);
         const nameCount = nameCountMap.get(name) || 0;
         nameCountMap.set(name, nameCount + 1);
         const nodeId = buildNodeId(name, nameCount, parentId);
@@ -1373,6 +1866,22 @@ function installFiberTreeWalker() {
         hookedRendererID = rendererID;
       }
       if (rendererID !== hookedRendererID) return;
+      try {
+        const client4 = getWebSocketClient();
+        if (client4.connected) {
+          const triggers = peekTriggers();
+          for (const trigger of triggers) {
+            client4.sendImmediate({ type: "runtime:renderTrigger", trigger });
+          }
+          const cascade = analyzeCascade(root, triggers);
+          if (cascade) {
+            client4.sendImmediate({ type: "runtime:renderCascade", cascade });
+          }
+          wrapFiberDispatchers(root);
+          clearTriggers();
+        }
+      } catch {
+      }
       sendDebouncedSnapshot(root);
     };
     activeStrategy = "devtools";
@@ -1434,7 +1943,7 @@ function detectDetailedRenderReason(fiber) {
   if (changedContexts.length > 0) {
     return { type: "context-changed", contextNames: changedContexts };
   }
-  const parentName = fiber.return ? getComponentName(fiber.return) : void 0;
+  const parentName = fiber.return ? getComponentName2(fiber.return) : void 0;
   return { type: "parent-render", parentName };
 }
 function diffProps(prev, next) {
