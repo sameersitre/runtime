@@ -42,7 +42,8 @@ export type RuntimeMessage =
   | RuntimeConsoleCaptureMessage
   | RuntimeTanStackQueryUpdateMessage
   | RuntimeRenderTriggerMessage
-  | RuntimeRenderCascadeMessage;
+  | RuntimeRenderCascadeMessage
+  | RuntimePropDrillingMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -188,6 +189,10 @@ export interface LiveTreeNode {
   reactKey?: string;
   /** TanStack Query hashes observed by this component (detected from useRef → QueryObserver) */
   queryHashes?: string[];
+  /** Number of hooks in this component (counted from memoizedState linked list) */
+  hookCount?: number;
+  /** True if any hook is useContext (indicates data may come from context, not just props) */
+  hasContextHook?: boolean;
 }
 
 // ============================================================================
@@ -546,6 +551,43 @@ export interface RuntimeRenderTriggerMessage {
 export interface RuntimeRenderCascadeMessage {
   type: 'runtime:renderCascade';
   cascade: CascadeRecord;
+}
+
+// ============================================================================
+// Prop Drilling Types (runtime-local mirror of shared types)
+// ============================================================================
+
+export interface PropDrillingChainNode {
+  nodeId: string;
+  componentName: string;
+  propKey: string;
+  role: 'source' | 'passthrough' | 'consumer';
+  hookCount: number;
+  hasContextHook: boolean;
+}
+
+export interface PropDrillingChain {
+  chainId: string;
+  propName: string;
+  sourceNodeId: string;
+  sourceComponentName: string;
+  consumerNodeIds: string[];
+  consumerComponentNames: string[];
+  path: PropDrillingChainNode[];
+  depth: number;
+  passthroughCount: number;
+  severity: 'info' | 'warning' | 'critical';
+  renames: Array<{ atNodeId: string; fromKey: string; toKey: string }>;
+}
+
+export interface RuntimePropDrillingMessage {
+  type: 'runtime:propDrilling';
+  payload: {
+    chains: PropDrillingChain[];
+    passthroughNodeIds: string[];
+    analysisTimestamp: number;
+    treeSize: number;
+  };
 }
 
 /**

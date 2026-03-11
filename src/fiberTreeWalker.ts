@@ -20,6 +20,7 @@ import { inspectEffects } from "./effectInspector";
 import { recordTimelineEvent } from "./timelineTracker";
 import { wrapFiberDispatchers, peekTriggers, clearTriggers } from "./dispatchWrapper";
 import { analyzeCascade } from "./cascadeAnalyzer";
+import { schedulePropDrillingAnalysis } from "./propDrillingAnalyzer";
 export type { SerializedValue };
 
 // React fiber tag constants (from React source: ReactWorkTags.js)
@@ -163,6 +164,31 @@ function detectQueryObserverHashes(fiber: Fiber): string[] | undefined {
   }
 
   return seen.size > 0 ? Array.from(seen) : undefined;
+}
+
+/**
+ * Count the number of hooks in a fiber's memoizedState linked list.
+ * Uses _debugHookTypes if available (dev mode), falls back to linked list traversal.
+ */
+function countFiberHooks(fiber: Fiber): number {
+  if (fiber._debugHookTypes) return fiber._debugHookTypes.length;
+  let count = 0;
+  let state = fiber.memoizedState;
+  while (state && count < 100) {
+    count++;
+    state = state.next as typeof state | null;
+  }
+  return count;
+}
+
+/**
+ * Detect if a fiber has any useContext hooks.
+ * Uses fiber.dependencies (React 18+) as primary signal, _debugHookTypes as fallback.
+ */
+function hasFiberContextHook(fiber: Fiber): boolean {
+  if (fiber.dependencies?.firstContext) return true;
+  if (fiber._debugHookTypes?.includes('useContext')) return true;
+  return false;
 }
 
 /**
@@ -559,6 +585,8 @@ function walkFiber(
           isFramework: framework,
           reactKey: typeof current.key === 'string' ? current.key : undefined,
           queryHashes,
+          hookCount: countFiberHooks(current),
+          hasContextHook: hasFiberContextHook(current) || undefined,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
@@ -907,6 +935,8 @@ function executeSnapshot(root: FiberRoot): void {
     }
 
     previousFlatTree = currentFlatTree;
+    // Schedule prop drilling analysis — debounced to 2s, runs in background after each snapshot
+    schedulePropDrillingAnalysis(tree, fiberRefMap, client);
     snapshotCounter++;
   } catch (error) {
     console.error("[FloTrace] Error walking fiber tree:", error);

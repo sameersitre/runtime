@@ -1292,6 +1292,347 @@ function analyzeCascade(root, triggers) {
   }
 }
 
+// src/propDrillingAnalyzer.ts
+var ANALYZE_INTERVAL_MS = 2e3;
+var DRILLING_THRESHOLD = 3;
+var EXCLUDED_PROP_NAMES = /* @__PURE__ */ new Set([
+  // React internals
+  "children",
+  "key",
+  "ref",
+  // Common HTML attributes
+  "className",
+  "style",
+  "id",
+  "name",
+  "type",
+  "value",
+  "placeholder",
+  "disabled",
+  "readOnly",
+  "required",
+  "autoFocus",
+  "tabIndex",
+  "role",
+  "aria-label",
+  "aria-describedby",
+  "aria-hidden",
+  "title",
+  "lang",
+  "dir",
+  "hidden",
+  // Common layout props
+  "width",
+  "height",
+  "size",
+  "variant",
+  "color",
+  "theme",
+  // Test IDs
+  "data-testid",
+  "testID"
+]);
+function isExcluded(propName) {
+  return EXCLUDED_PROP_NAMES.has(propName) || propName.startsWith("on");
+}
+var analyzeTimer = null;
+var lastAnalysisTime = 0;
+function valueFingerprint(value, depth = 0) {
+  if (depth > 3) return "__deep__";
+  if (value === null || value === void 0) return "null";
+  if (typeof value === "function") return `fn:${value.name || "anon"}`;
+  if (typeof value !== "object") return `${typeof value}:${String(value)}`;
+  if (Array.isArray(value)) {
+    const arr = value;
+    return `arr:${arr.length}:${arr.slice(0, 5).map((v) => valueFingerprint(v, depth + 1)).join(",")}`;
+  }
+  const obj = value;
+  const keys = Object.keys(obj).sort();
+  return `obj:${keys.slice(0, 10).map((k) => `${k}=${valueFingerprint(obj[k], depth + 1)}`).join(",")}`;
+}
+function shouldFlagRename(value) {
+  if (value === null || value === void 0) return false;
+  if (typeof value !== "object") return false;
+  if (Array.isArray(value) && value.length === 0) return false;
+  if (!Array.isArray(value) && Object.keys(value).length === 0) return false;
+  return true;
+}
+function computePropIntersectionRatio(nodeProps, childrenProps) {
+  const nodeKeys = Object.keys(nodeProps).filter((k) => !isExcluded(k));
+  if (nodeKeys.length === 0) return 0;
+  let forwarded = 0;
+  for (const key of nodeKeys) {
+    const fp = valueFingerprint(nodeProps[key]);
+    const isForwarded = childrenProps.some(
+      (cp) => Object.values(cp).some((v) => valueFingerprint(v) === fp)
+    );
+    if (isForwarded) forwarded++;
+  }
+  return forwarded / nodeKeys.length;
+}
+function classifyNode(nodeId, drilledPropFp, parentNodeId, childNodeIds, getProps, hookCounts, contextFlags) {
+  if (!parentNodeId) return "source";
+  const parentProps = getProps(parentNodeId);
+  const parentHasProp = Object.values(parentProps).some(
+    (v) => valueFingerprint(v) === drilledPropFp
+  );
+  if (!parentHasProp) return "source";
+  const forwardsToChild = childNodeIds.some((cid) => {
+    const childProps = getProps(cid);
+    return Object.values(childProps).some((v) => valueFingerprint(v) === drilledPropFp);
+  });
+  if (!forwardsToChild) return "consumer";
+  const hookCount = hookCounts.get(nodeId) ?? 0;
+  const hasContext = contextFlags.get(nodeId) ?? false;
+  if (hookCount === 0) return "passthrough";
+  if (hasContext) return "consumer";
+  const nodeProps = getProps(nodeId);
+  const childrenProps = childNodeIds.map(getProps);
+  const intersectionRatio = computePropIntersectionRatio(nodeProps, childrenProps);
+  if (intersectionRatio > 0.7 && hookCount <= 1) return "passthrough";
+  return "consumer";
+}
+function calculateSeverity(depth, passthroughCount, consumerCount) {
+  if (depth >= 5) return "critical";
+  if (passthroughCount >= 3) return "critical";
+  if (consumerCount >= 3 && depth >= 4) return "critical";
+  if (depth >= 4) return "warning";
+  if (passthroughCount >= 2) return "warning";
+  if (consumerCount >= 2) return "warning";
+  return "info";
+}
+function makeChainId(sourceNodeId, fp, consumerNodeId) {
+  return `${sourceNodeId}::${fp.slice(0, 20)}::${consumerNodeId}`;
+}
+function flattenTree(node, parentId, parentMap, childrenMap, nodeMap) {
+  if (node.isFramework) {
+    for (const child of node.children) {
+      flattenTree(child, parentId, parentMap, childrenMap, nodeMap);
+    }
+    return;
+  }
+  nodeMap.set(node.id, node);
+  if (parentId) {
+    parentMap.set(node.id, parentId);
+    const siblings = childrenMap.get(parentId) ?? [];
+    siblings.push(node.id);
+    childrenMap.set(parentId, siblings);
+  }
+  if (!childrenMap.has(node.id)) {
+    childrenMap.set(node.id, []);
+  }
+  for (const child of node.children) {
+    flattenTree(child, node.id, parentMap, childrenMap, nodeMap);
+  }
+}
+function runAnalysis(tree, fiberRefMap2) {
+  const parentMap = /* @__PURE__ */ new Map();
+  const childrenMap = /* @__PURE__ */ new Map();
+  const nodeMap = /* @__PURE__ */ new Map();
+  flattenTree(tree, void 0, parentMap, childrenMap, nodeMap);
+  const allNodeIds = Array.from(nodeMap.keys());
+  function getProps(nodeId) {
+    try {
+      return fiberRefMap2.get(nodeId)?.memoizedProps ?? {};
+    } catch {
+      return {};
+    }
+  }
+  const hookCounts = /* @__PURE__ */ new Map();
+  const contextFlags = /* @__PURE__ */ new Map();
+  for (const nodeId of allNodeIds) {
+    const node = nodeMap.get(nodeId);
+    hookCounts.set(nodeId, node.hookCount ?? 0);
+    contextFlags.set(nodeId, node.hasContextHook ?? false);
+  }
+  const edges = [];
+  for (const nodeId of allNodeIds) {
+    const parentId = parentMap.get(nodeId);
+    if (!parentId) continue;
+    const parentProps = getProps(parentId);
+    const childProps = getProps(nodeId);
+    const childKeys = Object.keys(childProps).filter((k) => !isExcluded(k));
+    const parentKeys = Object.keys(parentProps).filter((k) => !isExcluded(k));
+    for (const childKey of childKeys) {
+      const childVal = childProps[childKey];
+      if (typeof childVal === "function") continue;
+      const childFp = valueFingerprint(childVal);
+      if (childFp === "null") continue;
+      for (const parentKey of parentKeys) {
+        const parentVal = parentProps[parentKey];
+        if (typeof parentVal === "function") continue;
+        const parentFp = valueFingerprint(parentVal);
+        if (parentFp === childFp) {
+          const isRename = parentKey !== childKey;
+          if (!isRename || shouldFlagRename(parentVal)) {
+            edges.push({
+              parentNodeId: parentId,
+              childNodeId: nodeId,
+              propKey: parentKey,
+              childPropKey: childKey,
+              fp: childFp
+            });
+            break;
+          }
+        }
+      }
+    }
+  }
+  const edgesByFp = /* @__PURE__ */ new Map();
+  for (const edge of edges) {
+    const group = edgesByFp.get(edge.fp) ?? [];
+    group.push(edge);
+    edgesByFp.set(edge.fp, group);
+  }
+  const chains = [];
+  const passthroughNodeIdSet = /* @__PURE__ */ new Set();
+  for (const [fp, fpEdges] of edgesByFp) {
+    const outEdges = /* @__PURE__ */ new Map();
+    const inNodes = /* @__PURE__ */ new Set();
+    for (const edge of fpEdges) {
+      const out = outEdges.get(edge.parentNodeId) ?? [];
+      out.push(edge);
+      outEdges.set(edge.parentNodeId, out);
+      inNodes.add(edge.childNodeId);
+    }
+    const sourceNodeIds = /* @__PURE__ */ new Set();
+    for (const edge of fpEdges) {
+      if (!inNodes.has(edge.parentNodeId)) {
+        sourceNodeIds.add(edge.parentNodeId);
+      }
+    }
+    for (const sourceId of sourceNodeIds) {
+      let dfs2 = function(currentId, currentPropKey, currentPath, visited) {
+        if (visited.has(currentId)) return;
+        visited.add(currentId);
+        const outgoing = outEdges.get(currentId);
+        if (!outgoing || outgoing.length === 0) {
+          if (currentPath.length >= DRILLING_THRESHOLD) {
+            allPaths.push([...currentPath]);
+          }
+          visited.delete(currentId);
+          return;
+        }
+        for (const edge of outgoing) {
+          const isRename = edge.propKey !== edge.childPropKey;
+          dfs2(
+            edge.childNodeId,
+            edge.childPropKey,
+            [...currentPath, { nodeId: edge.childNodeId, propKey: edge.childPropKey, isRename }],
+            new Set(visited)
+          );
+        }
+        visited.delete(currentId);
+      };
+      var dfs = dfs2;
+      const firstEdge = outEdges.get(sourceId)?.[0];
+      if (!firstEdge) continue;
+      const sourcePropName = firstEdge.propKey;
+      const allPaths = [];
+      dfs2(
+        sourceId,
+        sourcePropName,
+        [{ nodeId: sourceId, propKey: sourcePropName, isRename: false }],
+        /* @__PURE__ */ new Set()
+      );
+      if (allPaths.length === 0) continue;
+      for (const path of allPaths) {
+        if (path.length < DRILLING_THRESHOLD) continue;
+        const consumerNodeId = path[path.length - 1].nodeId;
+        const consumerNode = nodeMap.get(consumerNodeId);
+        if (!consumerNode) continue;
+        const chainNodes = path.map((p, i) => {
+          const parentIdForNode = i === 0 ? void 0 : path[i - 1].nodeId;
+          const childNodeIds = i < path.length - 1 ? [path[i + 1].nodeId] : [];
+          const role = classifyNode(
+            p.nodeId,
+            fp,
+            parentIdForNode,
+            childNodeIds,
+            getProps,
+            hookCounts,
+            contextFlags
+          );
+          if (role === "passthrough") {
+            passthroughNodeIdSet.add(p.nodeId);
+          }
+          const n = nodeMap.get(p.nodeId);
+          return {
+            nodeId: p.nodeId,
+            componentName: n?.name ?? p.nodeId,
+            propKey: p.propKey,
+            role,
+            hookCount: hookCounts.get(p.nodeId) ?? 0,
+            hasContextHook: contextFlags.get(p.nodeId) ?? false
+          };
+        });
+        const passthroughCount = chainNodes.filter((n) => n.role === "passthrough").length;
+        const sourceNode = nodeMap.get(sourceId);
+        const renames = path.flatMap(
+          (p, idx) => p.isRename ? [{ atNodeId: p.nodeId, fromKey: idx > 0 ? path[idx - 1].propKey : sourcePropName, toKey: p.propKey }] : []
+        );
+        chains.push({
+          chainId: makeChainId(sourceId, fp, consumerNodeId),
+          propName: sourcePropName,
+          sourceNodeId: sourceId,
+          sourceComponentName: sourceNode?.name ?? sourceId,
+          consumerNodeIds: [consumerNodeId],
+          consumerComponentNames: [consumerNode.name],
+          path: chainNodes,
+          depth: path.length,
+          passthroughCount,
+          severity: calculateSeverity(path.length, passthroughCount, 1),
+          renames
+        });
+      }
+    }
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const dedupedChains = chains.filter((c) => {
+    if (seen.has(c.chainId)) return false;
+    seen.add(c.chainId);
+    return true;
+  });
+  const severityOrder = { critical: 0, warning: 1, info: 2 };
+  dedupedChains.sort((a, b) => {
+    const s = severityOrder[a.severity] - severityOrder[b.severity];
+    if (s !== 0) return s;
+    return b.depth - a.depth;
+  });
+  return {
+    chains: dedupedChains.slice(0, 50),
+    // cap at 50 chains
+    passthroughNodeIds: Array.from(passthroughNodeIdSet)
+  };
+}
+function schedulePropDrillingAnalysis(tree, fiberRefMap2, client4) {
+  if (analyzeTimer) clearTimeout(analyzeTimer);
+  const now = Date.now();
+  const elapsed = now - lastAnalysisTime;
+  const delay = elapsed >= ANALYZE_INTERVAL_MS ? 0 : ANALYZE_INTERVAL_MS - elapsed;
+  analyzeTimer = setTimeout(() => {
+    analyzeTimer = null;
+    if (!client4.connected) return;
+    try {
+      lastAnalysisTime = Date.now();
+      const { chains, passthroughNodeIds } = runAnalysis(tree, fiberRefMap2);
+      client4.sendImmediate({
+        type: "runtime:propDrilling",
+        payload: {
+          chains,
+          passthroughNodeIds,
+          analysisTimestamp: lastAnalysisTime,
+          treeSize: fiberRefMap2.size
+        }
+      });
+    } catch (err) {
+      if (typeof console !== "undefined") {
+        console.warn("[FloTrace] Prop drilling analysis error:", err);
+      }
+    }
+  }, delay);
+}
+
 // src/fiberTreeWalker.ts
 var FIBER_TAGS = {
   FunctionComponent: 0,
@@ -1366,6 +1707,21 @@ function detectQueryObserverHashes(fiber) {
     hookState = hookState.next;
   }
   return seen.size > 0 ? Array.from(seen) : void 0;
+}
+function countFiberHooks(fiber) {
+  if (fiber._debugHookTypes) return fiber._debugHookTypes.length;
+  let count = 0;
+  let state = fiber.memoizedState;
+  while (state && count < 100) {
+    count++;
+    state = state.next;
+  }
+  return count;
+}
+function hasFiberContextHook(fiber) {
+  if (fiber.dependencies?.firstContext) return true;
+  if (fiber._debugHookTypes?.includes("useContext")) return true;
+  return false;
 }
 var MAX_TREE_DEPTH = 100;
 var MAX_CHILDREN_PER_NODE = 300;
@@ -1546,7 +1902,9 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           lineNumber: current._debugSource?.lineNumber,
           isFramework: framework,
           reactKey: typeof current.key === "string" ? current.key : void 0,
-          queryHashes
+          queryHashes,
+          hookCount: countFiberHooks(current),
+          hasContextHook: hasFiberContextHook(current) || void 0
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else if (tag === FIBER_TAGS.SuspenseComponent) {
@@ -1749,7 +2107,7 @@ function executeSnapshot(root) {
       );
       return;
     }
-    const currentFlatTree = flattenTree(tree);
+    const currentFlatTree = flattenTree2(tree);
     const sendFull = previousFlatTree === null || snapshotCounter % FULL_SNAPSHOT_INTERVAL === 0;
     if (sendFull) {
       debugLog(
@@ -1797,6 +2155,7 @@ function executeSnapshot(root) {
       }
     }
     previousFlatTree = currentFlatTree;
+    schedulePropDrillingAnalysis(tree, fiberRefMap, client4);
     snapshotCounter++;
   } catch (error) {
     console.error("[FloTrace] Error walking fiber tree:", error);
@@ -1835,10 +2194,10 @@ var previousFlatTree = null;
 var diffSeq = 0;
 var snapshotCounter = 0;
 var FULL_SNAPSHOT_INTERVAL = 10;
-function flattenTree(root, out = /* @__PURE__ */ new Map()) {
+function flattenTree2(root, out = /* @__PURE__ */ new Map()) {
   out.set(root.id, root);
   for (const child of root.children) {
-    flattenTree(child, out);
+    flattenTree2(child, out);
   }
   return out;
 }

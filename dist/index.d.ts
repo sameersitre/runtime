@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -160,6 +160,10 @@ interface LiveTreeNode {
     reactKey?: string;
     /** TanStack Query hashes observed by this component (detected from useRef → QueryObserver) */
     queryHashes?: string[];
+    /** Number of hooks in this component (counted from memoizedState linked list) */
+    hookCount?: number;
+    /** True if any hook is useContext (indicates data may come from context, not just props) */
+    hasContextHook?: boolean;
 }
 /**
  * Enhanced render reason with specific prop/state/context changes.
@@ -444,6 +448,40 @@ interface RuntimeRenderTriggerMessage {
 interface RuntimeRenderCascadeMessage {
     type: 'runtime:renderCascade';
     cascade: CascadeRecord;
+}
+interface PropDrillingChainNode {
+    nodeId: string;
+    componentName: string;
+    propKey: string;
+    role: 'source' | 'passthrough' | 'consumer';
+    hookCount: number;
+    hasContextHook: boolean;
+}
+interface PropDrillingChain {
+    chainId: string;
+    propName: string;
+    sourceNodeId: string;
+    sourceComponentName: string;
+    consumerNodeIds: string[];
+    consumerComponentNames: string[];
+    path: PropDrillingChainNode[];
+    depth: number;
+    passthroughCount: number;
+    severity: 'info' | 'warning' | 'critical';
+    renames: Array<{
+        atNodeId: string;
+        fromKey: string;
+        toKey: string;
+    }>;
+}
+interface RuntimePropDrillingMessage {
+    type: 'runtime:propDrilling';
+    payload: {
+        chains: PropDrillingChain[];
+        passthroughNodeIds: string[];
+        analysisTimestamp: number;
+        treeSize: number;
+    };
 }
 /**
  * Messages received from extension
