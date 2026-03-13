@@ -21,6 +21,10 @@ import { recordTimelineEvent } from "./timelineTracker";
 import { wrapFiberDispatchers, peekTriggers, clearTriggers } from "./dispatchWrapper";
 import { analyzeCascade } from "./cascadeAnalyzer";
 import { schedulePropDrillingAnalysis } from "./propDrillingAnalyzer";
+import { detectCompilerStatus } from "./compilerAnalyzer";
+import { detectServerComponent, maybeEmitNextjsContext, resetNextjsDetection } from "./nextjsDetector";
+import { scanActionStateChanges, clearActionStateCache } from "./actionStateTracker";
+import { installRscPayloadInterceptor, uninstallRscPayloadInterceptor } from "./rscPayloadInterceptor";
 export type { SerializedValue };
 
 // React fiber tag constants (from React source: ReactWorkTags.js)
@@ -188,6 +192,25 @@ function countFiberHooks(fiber: Fiber): number {
 function hasFiberContextHook(fiber: Fiber): boolean {
   if (fiber.dependencies?.firstContext) return true;
   if (fiber._debugHookTypes?.includes('useContext')) return true;
+  return false;
+}
+
+/**
+ * Detect if any useTransition hook on this fiber currently has isPending=true.
+ * useTransition stores memoizedState as [isPending: boolean, startTransition: function].
+ * This shape is reliable across React 18/19 and detected the same way as hookInspector.
+ */
+function detectTransitionPending(fiber: Fiber): boolean {
+  let state = fiber.memoizedState;
+  let iterations = 0;
+  while (state && iterations < 100) {
+    iterations++;
+    const ms = state.memoizedState;
+    if (Array.isArray(ms) && ms.length === 2 && typeof ms[0] === 'boolean' && typeof ms[1] === 'function') {
+      if (ms[0] === true) return true;
+    }
+    state = state.next as FiberHookState | null;
+  }
   return false;
 }
 
@@ -513,6 +536,7 @@ function walkFiber(
   parentId: string,
   sharedNameCountMap?: Map<string, number>,
   depth = 0,
+  inSuspenseFallback = false,
 ): LiveTreeNode[] {
   if (!fiber) return [];
 
@@ -562,6 +586,7 @@ function walkFiber(
           nodeId,
           undefined,
           depth + 1,
+          inSuspenseFallback,
         );
 
         // Truncate children if there are too many (e.g., large tables/lists)
@@ -572,6 +597,9 @@ function walkFiber(
 
         const framework = isFrameworkComponent(current, name) || undefined;
         const queryHashes = detectQueryObserverHashes(current);
+        const isTransitionPending = detectTransitionPending(current) || undefined;
+        const compilerStatus = detectCompilerStatus(current);
+        const isServerComponent = detectServerComponent(current) || undefined;
         nodes.push({
           id: nodeId,
           name,
@@ -587,6 +615,10 @@ function walkFiber(
           queryHashes,
           hookCount: countFiberHooks(current),
           hasContextHook: hasFiberContextHook(current) || undefined,
+          isTransitionPending,
+          isSuspenseFallback: inSuspenseFallback || undefined,
+          compilerStatus,
+          isServerComponent,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
@@ -603,15 +635,17 @@ function walkFiber(
             parentId,
             nameCountMap,
             depth,
+            inSuspenseFallback,
           );
           nodes.push(...childNodes);
         } else if (primary?.sibling) {
-          // Fallback: skip hidden primary, walk fallback content only
+          // Fallback: mark all nodes in this subtree as isSuspenseFallback=true
           const childNodes = walkFiber(
             primary.sibling,
             parentId,
             nameCountMap,
             depth,
+            true, // all nodes in the fallback branch get isSuspenseFallback
           );
           nodes.push(...childNodes);
         } else {
@@ -628,6 +662,7 @@ function walkFiber(
             parentId,
             nameCountMap,
             depth,
+            inSuspenseFallback,
           );
           nodes.push(...childNodes);
         } else {
@@ -644,6 +679,7 @@ function walkFiber(
           parentId,
           nameCountMap,
           depth,
+          inSuspenseFallback,
         );
         nodes.push(...childNodes);
       }
@@ -937,6 +973,11 @@ function executeSnapshot(root: FiberRoot): void {
     previousFlatTree = currentFlatTree;
     // Schedule prop drilling analysis — debounced to 2s, runs in background after each snapshot
     schedulePropDrillingAnalysis(tree, fiberRefMap, client);
+    // Scan for useActionState / useOptimistic changes — best-effort, non-blocking
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    scanActionStateChanges(fiberRefMap as Map<string, any>, client);
+    // Emit Next.js context once on first snapshot if Next.js is detected
+    maybeEmitNextjsContext(client);
     snapshotCounter++;
   } catch (error) {
     console.error("[FloTrace] Error walking fiber tree:", error);
@@ -1164,6 +1205,14 @@ export function installFiberTreeWalker(): () => void {
   }
 
   isInstalled = true;
+
+  // Install RSC payload interceptor for Next.js App Router detection (best-effort)
+  try {
+    const client = getWebSocketClient();
+    installRscPayloadInterceptor(client);
+  } catch {
+    // Non-fatal
+  }
 
   // Strategy 1: Try DevTools hook
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -1487,5 +1536,8 @@ export function uninstallFiberTreeWalker(): void {
   diffSeq = 0;
   lastSnapshotSentTime = 0;
   isInstalled = false;
+  try { uninstallRscPayloadInterceptor(); } catch { /* non-fatal */ }
+  clearActionStateCache();
+  resetNextjsDetection();
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }

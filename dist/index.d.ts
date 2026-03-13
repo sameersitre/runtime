@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage | RuntimeActionStateMessage | RuntimeOptimisticDiffMessage | RuntimeNextjsContextMessage | RuntimeRscPayloadMessage | RuntimeHydrationEventMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -130,6 +130,12 @@ interface RuntimeTreeDiffMessage {
     timestamp: number;
 }
 /**
+ * React Compiler memoization status for a component.
+ * Detected by checking for the React Compiler memo cache sentinel in fiber state.
+ * Mirrors the CompilerStatus type in src/shared/liveMessages.ts.
+ */
+type CompilerStatus = 'compiled' | 'manual' | 'unoptimized' | 'de-opted';
+/**
  * A node in the live component tree captured from React fiber tree.
  * Path-based IDs ensure stability across snapshots for React Flow animations.
  */
@@ -164,6 +170,16 @@ interface LiveTreeNode {
     hookCount?: number;
     /** True if any hook is useContext (indicates data may come from context, not just props) */
     hasContextHook?: boolean;
+    /** True if a useTransition hook on this component currently has isPending=true */
+    isTransitionPending?: boolean;
+    /** True if this component is currently rendering inside a Suspense fallback branch */
+    isSuspenseFallback?: boolean;
+    /** React Compiler memoization status (undefined = not analyzed / compiler not detected) */
+    compilerStatus?: CompilerStatus;
+    /** True if this is detected as a Next.js Server Component (heuristic) */
+    isServerComponent?: boolean;
+    /** True if this is the first client component below a server component boundary */
+    isClientBoundary?: boolean;
 }
 /**
  * Enhanced render reason with specific prop/state/context changes.
@@ -482,6 +498,58 @@ interface RuntimePropDrillingMessage {
         analysisTimestamp: number;
         treeSize: number;
     };
+}
+/** Sent whenever a useActionState or useOptimistic hook changes on any fiber */
+interface RuntimeActionStateMessage {
+    type: 'runtime:actionState';
+    nodeId: string;
+    componentName: string;
+    /** One entry per useActionState / useOptimistic hook on this fiber */
+    actions: Array<{
+        hookIndex: number;
+        hookKind: 'action' | 'optimistic';
+        isPending: boolean;
+        state: SerializedValue;
+        error?: SerializedValue;
+        pendingSince?: number;
+        durationMs?: number;
+    }>;
+    timestamp: number;
+}
+/** Sent when a useOptimistic value diverges from its underlying actual value */
+interface RuntimeOptimisticDiffMessage {
+    type: 'runtime:optimisticDiff';
+    nodeId: string;
+    componentName: string;
+    hookIndex: number;
+    optimisticValue: SerializedValue;
+    actualValue: SerializedValue;
+    timestamp: number;
+}
+/** Sent once on mount when the Next.js environment is detected */
+interface RuntimeNextjsContextMessage {
+    type: 'runtime:nextjsContext';
+    detected: boolean;
+    version?: string;
+    isAppRouter: boolean;
+    initialRoute?: string;
+    timestamp: number;
+}
+/** Sent when an RSC / Next.js data fetch is intercepted (metadata only, no values) */
+interface RuntimeRscPayloadMessage {
+    type: 'runtime:rscPayload';
+    route: string;
+    payloadSizeBytes: number;
+    cacheStatus: 'HIT' | 'MISS' | 'STALE' | 'unknown';
+    timestamp: number;
+}
+/** Sent when React hydration completes or a mismatch is detected */
+interface RuntimeHydrationEventMessage {
+    type: 'runtime:hydrationEvent';
+    kind: 'complete' | 'mismatch';
+    durationMs?: number;
+    errorMessage?: string;
+    timestamp: number;
 }
 /**
  * Messages received from extension

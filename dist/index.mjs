@@ -1563,6 +1563,221 @@ function schedulePropDrillingAnalysis(tree, fiberRefMap2, client4) {
   }, delay);
 }
 
+// src/compilerAnalyzer.ts
+var MEMO_CACHE_SENTINEL = /* @__PURE__ */ Symbol.for("react.memo_cache_sentinel");
+var FUNCTION_COMPONENT = 0;
+var SIMPLE_MEMO = 15;
+function detectCompilerStatus(fiber) {
+  if (fiber.tag === SIMPLE_MEMO) return "manual";
+  if (fiber.tag !== FUNCTION_COMPONENT) return void 0;
+  const firstHook = fiber.memoizedState;
+  if (!firstHook) return "unoptimized";
+  const cache = firstHook.memoizedState;
+  if (!Array.isArray(cache) || cache.length === 0) return "unoptimized";
+  const hasSentinel = cache.some((v) => v === MEMO_CACHE_SENTINEL);
+  if (!hasSentinel) return "unoptimized";
+  const allSentinel = cache.every((v) => v === MEMO_CACHE_SENTINEL);
+  if (allSentinel && fiber.alternate != null) return "de-opted";
+  return "compiled";
+}
+
+// src/nextjsDetector.ts
+var SERVER_COMPONENT_PATTERNS = [
+  /\.server\.[jt]sx?$/,
+  // explicit .server.tsx convention
+  /[\\/]app[\\/].+[\\/]page\.[jt]sx?$/,
+  // Next.js app router page
+  /[\\/]app[\\/].+[\\/]layout\.[jt]sx?$/,
+  // Next.js app router layout
+  /[\\/]app[\\/].+[\\/]loading\.[jt]sx?$/,
+  // Next.js loading UI
+  /[\\/]app[\\/].+[\\/]error\.[jt]sx?$/
+  // Next.js error UI
+];
+var SERVER_REFERENCE_PATTERNS = [
+  /_ServerReference$/,
+  /^RSC_/
+];
+var detectionEmitted = false;
+function maybeEmitNextjsContext(client4) {
+  if (detectionEmitted) return;
+  try {
+    const win = globalThis;
+    const hasNextData = "__NEXT_DATA__" in win;
+    const hasNextRouter = "__next_router_state_tree__" in win;
+    const hasNext = "next" in win && win.next !== null;
+    if (!hasNextData && !hasNextRouter && !hasNext) return;
+    detectionEmitted = true;
+    let version;
+    let isAppRouter = false;
+    let initialRoute;
+    try {
+      const nextData = win.__NEXT_DATA__;
+      if (nextData) {
+        version = typeof nextData.buildId === "string" ? nextData.buildId : void 0;
+        initialRoute = typeof nextData.page === "string" ? nextData.page : void 0;
+      }
+      isAppRouter = hasNextRouter || !!win.__next_router_state_tree__;
+    } catch {
+    }
+    client4.sendImmediate({
+      type: "runtime:nextjsContext",
+      detected: true,
+      version,
+      isAppRouter,
+      initialRoute,
+      timestamp: Date.now()
+    });
+  } catch {
+  }
+}
+function detectServerComponent(fiber) {
+  const type = fiber.type;
+  if (type) {
+    const name = type.displayName || type.name || "";
+    if (SERVER_REFERENCE_PATTERNS.some((p) => p.test(name))) return true;
+  }
+  const fileName = fiber._debugSource?.fileName;
+  if (fileName) {
+    if (SERVER_COMPONENT_PATTERNS.some((p) => p.test(fileName))) return true;
+  }
+  return false;
+}
+function resetNextjsDetection() {
+  detectionEmitted = false;
+}
+
+// src/actionStateTracker.ts
+var prevActionStateMap = /* @__PURE__ */ new Map();
+var ACTION_STATE_HOOK_NAMES = /* @__PURE__ */ new Set(["useActionState"]);
+var OPTIMISTIC_HOOK_NAMES = /* @__PURE__ */ new Set(["useOptimistic"]);
+function extractActionEntries(fiber) {
+  const hookTypes = fiber._debugHookTypes;
+  if (!hookTypes) return null;
+  const entries = [];
+  let hookState = fiber.memoizedState;
+  let hookIdx = 0;
+  for (const hookType of hookTypes) {
+    if (!hookState) break;
+    if (ACTION_STATE_HOOK_NAMES.has(hookType)) {
+      const ms = hookState.memoizedState;
+      if (Array.isArray(ms) && ms.length >= 3) {
+        entries.push({
+          hookIndex: hookIdx,
+          hookKind: "action",
+          isPending: ms[2] === true,
+          state: serializeValue(ms[0])
+        });
+      }
+    } else if (OPTIMISTIC_HOOK_NAMES.has(hookType)) {
+      const ms = hookState.memoizedState;
+      if (Array.isArray(ms)) {
+        entries.push({
+          hookIndex: hookIdx,
+          hookKind: "optimistic",
+          isPending: false,
+          // optimistic values are "immediately applied"
+          state: serializeValue(ms[0])
+        });
+      }
+    }
+    hookState = hookState.next;
+    hookIdx++;
+  }
+  return entries.length > 0 ? entries : null;
+}
+function scanActionStateChanges(fiberRefMap2, client4) {
+  try {
+    for (const [nodeId, fiber] of fiberRefMap2) {
+      const entries = extractActionEntries(fiber);
+      if (!entries) continue;
+      const snapshot = JSON.stringify(entries.map((e) => ({ i: e.hookIndex, p: e.isPending, s: e.state })));
+      if (prevActionStateMap.get(nodeId) === snapshot) continue;
+      prevActionStateMap.set(nodeId, snapshot);
+      const componentName = nodeId.split("/").pop()?.replace(/-\d+$/, "") ?? "Unknown";
+      client4.send({
+        type: "runtime:actionState",
+        nodeId,
+        componentName,
+        actions: entries,
+        timestamp: Date.now()
+      });
+    }
+  } catch {
+  }
+}
+function clearActionStateCache() {
+  prevActionStateMap.clear();
+}
+
+// src/rscPayloadInterceptor.ts
+var RSC_URL_PATTERNS = [
+  /\?_rsc=/,
+  // App Router RSC param
+  /\?__RSC__=/,
+  // Older Next.js RSC param
+  /\/_next\/data\//,
+  // Pages Router getServerSideProps / getStaticProps
+  /\/__nextjs_original-stack-frame/
+];
+function parseCacheStatus(headers) {
+  const raw = headers.get("x-nextjs-cache") || headers.get("x-vercel-cache") || "";
+  switch (raw.toUpperCase()) {
+    case "HIT":
+      return "HIT";
+    case "MISS":
+      return "MISS";
+    case "STALE":
+      return "STALE";
+    default:
+      return "unknown";
+  }
+}
+function extractRoute(url) {
+  try {
+    const u = new URL(url, globalThis.location?.href ?? "http://localhost");
+    return u.pathname;
+  } catch {
+    return url.split("?")[0] ?? url;
+  }
+}
+var originalFetch = null;
+var interceptorClient = null;
+var isInstalled2 = false;
+function installRscPayloadInterceptor(client4) {
+  if (isInstalled2 || typeof globalThis.fetch !== "function") return;
+  isInstalled2 = true;
+  interceptorClient = client4;
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = async function patchedFetch(input, init) {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const isRscRequest = RSC_URL_PATTERNS.some((p) => p.test(url));
+    const response = await originalFetch.call(globalThis, input, init);
+    if (isRscRequest && interceptorClient?.connected) {
+      try {
+        const sizeHeader = response.headers.get("content-length");
+        const payloadSizeBytes = sizeHeader ? parseInt(sizeHeader, 10) : 0;
+        interceptorClient.send({
+          type: "runtime:rscPayload",
+          route: extractRoute(url),
+          payloadSizeBytes: isNaN(payloadSizeBytes) ? 0 : payloadSizeBytes,
+          cacheStatus: parseCacheStatus(response.headers),
+          timestamp: Date.now()
+        });
+      } catch {
+      }
+    }
+    return response;
+  };
+}
+function uninstallRscPayloadInterceptor() {
+  if (!isInstalled2 || !originalFetch) return;
+  globalThis.fetch = originalFetch;
+  originalFetch = null;
+  interceptorClient = null;
+  isInstalled2 = false;
+}
+
 // src/fiberTreeWalker.ts
 var FIBER_TAGS = {
   FunctionComponent: 0,
@@ -1653,6 +1868,19 @@ function hasFiberContextHook(fiber) {
   if (fiber._debugHookTypes?.includes("useContext")) return true;
   return false;
 }
+function detectTransitionPending(fiber) {
+  let state = fiber.memoizedState;
+  let iterations = 0;
+  while (state && iterations < 100) {
+    iterations++;
+    const ms = state.memoizedState;
+    if (Array.isArray(ms) && ms.length === 2 && typeof ms[0] === "boolean" && typeof ms[1] === "function") {
+      if (ms[0] === true) return true;
+    }
+    state = state.next;
+  }
+  return false;
+}
 var MAX_TREE_DEPTH = 100;
 var MAX_CHILDREN_PER_NODE = 300;
 var throttleTimer = null;
@@ -1664,7 +1892,7 @@ var snapshotIntervalMs = INTERVAL_MS_SMALL;
 var cachedFiberRoot = null;
 var isWalking = false;
 var originalOnCommitFiberRoot = null;
-var isInstalled2 = false;
+var isInstalled3 = false;
 var hookedRendererID = null;
 var activeStrategy = null;
 var lastSnapshotSentTime = 0;
@@ -1787,7 +2015,7 @@ function detectRenderReason(fiber, renderPhase) {
   }
   return "state-or-context";
 }
-function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
+function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0, inSuspenseFallback = false) {
   if (!fiber) return [];
   if (depth >= MAX_TREE_DEPTH) return [];
   const nodes = [];
@@ -1815,11 +2043,15 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           current.child,
           nodeId,
           void 0,
-          depth + 1
+          depth + 1,
+          inSuspenseFallback
         );
         const truncatedChildren = children.length > MAX_CHILDREN_PER_NODE ? children.slice(0, MAX_CHILDREN_PER_NODE) : children;
         const framework = isFrameworkComponent(current, name) || void 0;
         const queryHashes = detectQueryObserverHashes(current);
+        const isTransitionPending = detectTransitionPending(current) || void 0;
+        const compilerStatus = detectCompilerStatus(current);
+        const isServerComponent = detectServerComponent(current) || void 0;
         nodes.push({
           id: nodeId,
           name,
@@ -1834,7 +2066,11 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           reactKey: typeof current.key === "string" ? current.key : void 0,
           queryHashes,
           hookCount: countFiberHooks(current),
-          hasContextHook: hasFiberContextHook(current) || void 0
+          hasContextHook: hasFiberContextHook(current) || void 0,
+          isTransitionPending,
+          isSuspenseFallback: inSuspenseFallback || void 0,
+          compilerStatus,
+          isServerComponent
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else if (tag === FIBER_TAGS.SuspenseComponent) {
@@ -1844,7 +2080,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
             primary.child,
             parentId,
             nameCountMap,
-            depth
+            depth,
+            inSuspenseFallback
           );
           nodes.push(...childNodes);
         } else if (primary?.sibling) {
@@ -1852,7 +2089,9 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
             primary.sibling,
             parentId,
             nameCountMap,
-            depth
+            depth,
+            true
+            // all nodes in the fallback branch get isSuspenseFallback
           );
           nodes.push(...childNodes);
         } else {
@@ -1864,7 +2103,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
             current.child,
             parentId,
             nameCountMap,
-            depth
+            depth,
+            inSuspenseFallback
           );
           nodes.push(...childNodes);
         } else {
@@ -1875,7 +2115,8 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0) {
           current.child,
           parentId,
           nameCountMap,
-          depth
+          depth,
+          inSuspenseFallback
         );
         nodes.push(...childNodes);
       }
@@ -2086,6 +2327,8 @@ function executeSnapshot(root) {
     }
     previousFlatTree = currentFlatTree;
     schedulePropDrillingAnalysis(tree, fiberRefMap, client4);
+    scanActionStateChanges(fiberRefMap, client4);
+    maybeEmitNextjsContext(client4);
     snapshotCounter++;
   } catch (error) {
     console.error("[FloTrace] Error walking fiber tree:", error);
@@ -2165,7 +2408,7 @@ function computeTreeDiff(prev, curr) {
   return { added, removed, updated };
 }
 function requestTreeSnapshot() {
-  if (!isInstalled2) {
+  if (!isInstalled3) {
     return;
   }
   if (activeStrategy === "devtools") {
@@ -2187,7 +2430,7 @@ function requestFullSnapshot() {
   }
 }
 function installFiberTreeWalker() {
-  if (isInstalled2) {
+  if (isInstalled3) {
     console.warn("[FloTrace] Fiber tree walker already installed");
     return () => uninstallFiberTreeWalker();
   }
@@ -2198,7 +2441,12 @@ function installFiberTreeWalker() {
     return () => {
     };
   }
-  isInstalled2 = true;
+  isInstalled3 = true;
+  try {
+    const client4 = getWebSocketClient();
+    installRscPayloadInterceptor(client4);
+  } catch {
+  }
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
   if (hook && typeof hook.onCommitFiberRoot === "function") {
     originalOnCommitFiberRoot = hook.onCommitFiberRoot;
@@ -2380,7 +2628,7 @@ function getFiberRefMap() {
   return fiberRefMap;
 }
 function uninstallFiberTreeWalker() {
-  if (!isInstalled2) return;
+  if (!isInstalled3) return;
   if (throttleTimer) {
     clearTimeout(throttleTimer);
     throttleTimer = null;
@@ -2408,7 +2656,13 @@ function uninstallFiberTreeWalker() {
   snapshotCounter = 0;
   diffSeq = 0;
   lastSnapshotSentTime = 0;
-  isInstalled2 = false;
+  isInstalled3 = false;
+  try {
+    uninstallRscPayloadInterceptor();
+  } catch {
+  }
+  clearActionStateCache();
+  resetNextjsDetection();
   console.log("[FloTrace] Fiber tree walker uninstalled");
 }
 
@@ -2428,15 +2682,15 @@ function serializeStoreState(state, logPrefix) {
 
 // src/zustandTracker.ts
 var activeUnsubscribers = [];
-var isInstalled3 = false;
+var isInstalled4 = false;
 var debounceTimers = /* @__PURE__ */ new Map();
 var DEBOUNCE_MS = 200;
 function installZustandTracker(stores, client4) {
-  if (isInstalled3) {
+  if (isInstalled4) {
     console.warn("[FloTrace] Zustand tracker already installed, reinstalling");
     uninstallZustandTracker();
   }
-  isInstalled3 = true;
+  isInstalled4 = true;
   console.log("[FloTrace] Installing Zustand tracker for stores:", Object.keys(stores));
   for (const [storeName, store] of Object.entries(stores)) {
     if (!store || typeof store !== "object" && typeof store !== "function" || typeof store.getState !== "function" || typeof store.subscribe !== "function") {
@@ -2462,7 +2716,7 @@ function installZustandTracker(stores, client4) {
   }
 }
 function uninstallZustandTracker() {
-  if (!isInstalled3) return;
+  if (!isInstalled4) return;
   for (const timer of debounceTimers.values()) {
     clearTimeout(timer);
   }
@@ -2475,7 +2729,7 @@ function uninstallZustandTracker() {
     }
   }
   activeUnsubscribers = [];
-  isInstalled3 = false;
+  isInstalled4 = false;
   console.log("[FloTrace] Zustand tracker uninstalled");
 }
 function scheduleStoreUpdate(storeName, prevState, newState, client4) {
@@ -2511,7 +2765,7 @@ function sendStoreUpdate(storeName, state, changedKeys, client4) {
 
 // src/reduxTracker.ts
 var activeUnsubscribe = null;
-var isInstalled4 = false;
+var isInstalled5 = false;
 var debounceTimer = null;
 var previousState = null;
 var DEBOUNCE_MS2 = 200;
@@ -2519,11 +2773,11 @@ function isReduxStore(obj) {
   return typeof obj === "object" && obj !== null && typeof obj.getState === "function" && typeof obj.subscribe === "function" && typeof obj.dispatch === "function";
 }
 function installReduxTracker(store, client4) {
-  if (isInstalled4) {
+  if (isInstalled5) {
     console.warn("[FloTrace] Redux tracker already installed, reinstalling");
     uninstallReduxTracker();
   }
-  isInstalled4 = true;
+  isInstalled5 = true;
   console.log("[FloTrace] Installing Redux tracker");
   try {
     const initialState = store.getState();
@@ -2539,11 +2793,11 @@ function installReduxTracker(store, client4) {
     });
   } catch (error) {
     console.error("[FloTrace] Failed to install Redux tracker:", error);
-    isInstalled4 = false;
+    isInstalled5 = false;
   }
 }
 function uninstallReduxTracker() {
-  if (!isInstalled4) return;
+  if (!isInstalled5) return;
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
@@ -2557,7 +2811,7 @@ function uninstallReduxTracker() {
     activeUnsubscribe = null;
   }
   previousState = null;
-  isInstalled4 = false;
+  isInstalled5 = false;
   console.log("[FloTrace] Redux tracker uninstalled");
 }
 function scheduleReduxUpdate(newState, client4) {
@@ -2591,7 +2845,7 @@ function sendReduxUpdate(state, changedKeys, client4) {
 }
 
 // src/tanstackQueryTracker.ts
-var isInstalled5 = false;
+var isInstalled6 = false;
 var queryUnsubscribe = null;
 var mutationUnsubscribe = null;
 var debounceTimer2 = null;
@@ -2611,11 +2865,11 @@ function isTanStackQueryClient(obj) {
   return typeof candidate.getQueryCache === "function" && typeof candidate.getMutationCache === "function";
 }
 function installTanStackQueryTracker(queryClient, client4) {
-  if (isInstalled5) {
+  if (isInstalled6) {
     console.warn("[FloTrace] TanStack Query tracker already installed, reinstalling");
     uninstallTanStackQueryTracker();
   }
-  isInstalled5 = true;
+  isInstalled6 = true;
   console.log("[FloTrace] Installing TanStack Query tracker");
   try {
     const queryCache = queryClient.getQueryCache();
@@ -2653,11 +2907,11 @@ function installTanStackQueryTracker(queryClient, client4) {
     });
   } catch (error) {
     console.error("[FloTrace] Failed to install TanStack Query tracker:", error);
-    isInstalled5 = false;
+    isInstalled6 = false;
   }
 }
 function uninstallTanStackQueryTracker() {
-  if (!isInstalled5) return;
+  if (!isInstalled6) return;
   if (debounceTimer2) {
     clearTimeout(debounceTimer2);
     debounceTimer2 = null;
@@ -2682,7 +2936,7 @@ function uninstallTanStackQueryTracker() {
     clearTimeout(pending.timeoutId);
   }
   pendingCorrelations.clear();
-  isInstalled5 = false;
+  isInstalled6 = false;
   console.log("[FloTrace] TanStack Query tracker uninstalled");
 }
 function computeDataHash(data) {
@@ -2969,7 +3223,7 @@ function safeCall(fn, fallback) {
 }
 
 // src/routerTracker.ts
-var isInstalled6 = false;
+var isInstalled7 = false;
 var debounceTimer3 = null;
 var client2 = null;
 var originalPushState = null;
@@ -2977,7 +3231,7 @@ var originalReplaceState = null;
 var popstateHandler = null;
 var DEBOUNCE_MS4 = 200;
 function installRouterTracker(wsClient) {
-  if (isInstalled6) {
+  if (isInstalled7) {
     console.warn("[FloTrace] Router tracker already installed, reinstalling");
     uninstallRouterTracker();
   }
@@ -2987,7 +3241,7 @@ function installRouterTracker(wsClient) {
   }
   console.log("[FloTrace] Installing router tracker");
   try {
-    isInstalled6 = true;
+    isInstalled7 = true;
     client2 = wsClient;
     originalPushState = history.pushState.bind(history);
     originalReplaceState = history.replaceState.bind(history);
@@ -3025,7 +3279,7 @@ function installRouterTracker(wsClient) {
   }
 }
 function uninstallRouterTracker() {
-  if (!isInstalled6) return;
+  if (!isInstalled7) return;
   if (debounceTimer3) {
     clearTimeout(debounceTimer3);
     debounceTimer3 = null;
@@ -3055,7 +3309,7 @@ function uninstallRouterTracker() {
     console.error("[FloTrace] Error removing popstate listener:", error);
   }
   client2 = null;
-  isInstalled6 = false;
+  isInstalled7 = false;
   console.log("[FloTrace] Router tracker uninstalled");
 }
 function scheduleRouterUpdate() {
@@ -3096,13 +3350,13 @@ var MAX_ARGS_PER_ENTRY = 10;
 var MAX_BUFFER_SIZE = 300;
 var originals = /* @__PURE__ */ new Map();
 var client3 = null;
-var isInstalled7 = false;
+var isInstalled8 = false;
 var buffer = [];
 var flushTimer2 = null;
 function installConsoleTracker(wsClient) {
-  if (isInstalled7) return;
+  if (isInstalled8) return;
   client3 = wsClient;
-  isInstalled7 = true;
+  isInstalled8 = true;
   for (const method of METHODS) {
     originals.set(method, console[method].bind(console));
     console[method] = (...args) => {
@@ -3113,7 +3367,7 @@ function installConsoleTracker(wsClient) {
   flushTimer2 = setInterval(flushBuffer, FLUSH_INTERVAL_MS2);
 }
 function uninstallConsoleTracker() {
-  if (!isInstalled7) return;
+  if (!isInstalled8) return;
   for (const [method, original] of originals) {
     console[method] = original;
   }
@@ -3125,7 +3379,7 @@ function uninstallConsoleTracker() {
   flushBuffer();
   buffer = [];
   client3 = null;
-  isInstalled7 = false;
+  isInstalled8 = false;
 }
 function captureEntry(level, args) {
   if (args.length > 0 && typeof args[0] === "string" && args[0].startsWith("[FloTrace]")) {

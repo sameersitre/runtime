@@ -43,7 +43,13 @@ export type RuntimeMessage =
   | RuntimeTanStackQueryUpdateMessage
   | RuntimeRenderTriggerMessage
   | RuntimeRenderCascadeMessage
-  | RuntimePropDrillingMessage;
+  | RuntimePropDrillingMessage
+  // React 19+ & Next.js SSR features
+  | RuntimeActionStateMessage
+  | RuntimeOptimisticDiffMessage
+  | RuntimeNextjsContextMessage
+  | RuntimeRscPayloadMessage
+  | RuntimeHydrationEventMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -159,6 +165,13 @@ export interface RuntimeTreeDiffMessage {
 // ============================================================================
 
 /**
+ * React Compiler memoization status for a component.
+ * Detected by checking for the React Compiler memo cache sentinel in fiber state.
+ * Mirrors the CompilerStatus type in src/shared/liveMessages.ts.
+ */
+export type CompilerStatus = 'compiled' | 'manual' | 'unoptimized' | 'de-opted';
+
+/**
  * A node in the live component tree captured from React fiber tree.
  * Path-based IDs ensure stability across snapshots for React Flow animations.
  */
@@ -193,6 +206,19 @@ export interface LiveTreeNode {
   hookCount?: number;
   /** True if any hook is useContext (indicates data may come from context, not just props) */
   hasContextHook?: boolean;
+  // --- Feature C: Concurrent Updates ---
+  /** True if a useTransition hook on this component currently has isPending=true */
+  isTransitionPending?: boolean;
+  /** True if this component is currently rendering inside a Suspense fallback branch */
+  isSuspenseFallback?: boolean;
+  // --- Feature D: React Compiler ---
+  /** React Compiler memoization status (undefined = not analyzed / compiler not detected) */
+  compilerStatus?: CompilerStatus;
+  // --- Feature E: Next.js App Router ---
+  /** True if this is detected as a Next.js Server Component (heuristic) */
+  isServerComponent?: boolean;
+  /** True if this is the first client component below a server component boundary */
+  isClientBoundary?: boolean;
 }
 
 // ============================================================================
@@ -588,6 +614,67 @@ export interface RuntimePropDrillingMessage {
     analysisTimestamp: number;
     treeSize: number;
   };
+}
+
+// ============================================================================
+// React 19+ & Next.js SSR Runtime Messages
+// ============================================================================
+
+/** Sent whenever a useActionState or useOptimistic hook changes on any fiber */
+export interface RuntimeActionStateMessage {
+  type: 'runtime:actionState';
+  nodeId: string;
+  componentName: string;
+  /** One entry per useActionState / useOptimistic hook on this fiber */
+  actions: Array<{
+    hookIndex: number;
+    hookKind: 'action' | 'optimistic';
+    isPending: boolean;
+    state: SerializedValue;
+    error?: SerializedValue;
+    pendingSince?: number;
+    durationMs?: number;
+  }>;
+  timestamp: number;
+}
+
+/** Sent when a useOptimistic value diverges from its underlying actual value */
+export interface RuntimeOptimisticDiffMessage {
+  type: 'runtime:optimisticDiff';
+  nodeId: string;
+  componentName: string;
+  hookIndex: number;
+  optimisticValue: SerializedValue;
+  actualValue: SerializedValue;
+  timestamp: number;
+}
+
+/** Sent once on mount when the Next.js environment is detected */
+export interface RuntimeNextjsContextMessage {
+  type: 'runtime:nextjsContext';
+  detected: boolean;
+  version?: string;
+  isAppRouter: boolean;
+  initialRoute?: string;
+  timestamp: number;
+}
+
+/** Sent when an RSC / Next.js data fetch is intercepted (metadata only, no values) */
+export interface RuntimeRscPayloadMessage {
+  type: 'runtime:rscPayload';
+  route: string;
+  payloadSizeBytes: number;
+  cacheStatus: 'HIT' | 'MISS' | 'STALE' | 'unknown';
+  timestamp: number;
+}
+
+/** Sent when React hydration completes or a mismatch is detected */
+export interface RuntimeHydrationEventMessage {
+  type: 'runtime:hydrationEvent';
+  kind: 'complete' | 'mismatch';
+  durationMs?: number;
+  errorMessage?: string;
+  timestamp: number;
 }
 
 /**
