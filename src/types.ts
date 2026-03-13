@@ -219,6 +219,11 @@ export interface LiveTreeNode {
   isServerComponent?: boolean;
   /** True if this is the first client component below a server component boundary */
   isClientBoundary?: boolean;
+  // --- Library detection ---
+  /** True if this component is from a third-party library, not user-defined code */
+  isLibrary?: boolean;
+  /** Short display label for the library source (e.g. 'framer', 'fontawesome', 'sonner') */
+  libraryName?: string;
 }
 
 // ============================================================================

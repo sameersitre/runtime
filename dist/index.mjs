@@ -1934,11 +1934,12 @@ function isUserComponent(fiber) {
     return false;
   if (name.startsWith("FloTrace")) return false;
   if (name.startsWith("@") || name.includes("/")) return false;
+  if (/^[$_][A-Za-z0-9]{0,3}$/.test(name)) return false;
   if (fiber._debugSource?.fileName?.includes("node_modules")) return false;
   return true;
 }
 var FRAMEWORK_COMPONENT_NAMES = /* @__PURE__ */ new Set([
-  // Next.js App Router internals
+  // Next.js App Router internals (Next.js 13–14)
   "InnerLayoutRouter",
   "OuterLayoutRouter",
   "HotReload",
@@ -1956,7 +1957,14 @@ var FRAMEWORK_COMPONENT_NAMES = /* @__PURE__ */ new Set([
   "RedirectErrorBoundary",
   "InnerScrollAndFocusHandler",
   "GlobalError",
-  // React Router v6
+  // Next.js 15 / React 19 new internals
+  "ViewTransition",
+  // Next.js 15 shared-element transition wrapper
+  "ActionStateContext",
+  // Next.js 15 server action state context provider
+  "RequestCookiesProvider",
+  "DraftModeProvider",
+  // React Router v6 / v7
   "Routes",
   "Route",
   "Router",
@@ -1967,18 +1975,56 @@ var FRAMEWORK_COMPONENT_NAMES = /* @__PURE__ */ new Set([
   "Navigate",
   "RenderedRoute",
   "RouterProvider",
-  // Common wrappers
+  // React 19 built-in primitives
+  "Activity",
+  // React 19: show/hide subtrees while preserving state (was <Offscreen>)
+  // Common library wrappers
   "Suspense",
   "ErrorBoundary",
   "QueryClientProvider",
   "PersistGate"
 ]);
 var FRAMEWORK_PATH_PATTERNS = [
+  // React core / Next.js
   /next[\\/]dist/,
-  /react-router/,
   /react-dom/,
+  /[\\/]scheduler[\\/]/,
+  // React internal scheduler package
+  // Routing
+  /react-router/,
+  // React Router v6
+  /@react-router[\\/]/,
+  // React Router v7 (scoped package)
+  // State management
   /@tanstack[\\/]/,
-  /react-redux/
+  // TanStack Query / Table / Router / Form / Virtual
+  /react-redux/,
+  /zustand/,
+  /jotai/,
+  /recoil/,
+  // UI component libraries (for when source maps are available)
+  /@fortawesome[\\/]/,
+  // Font Awesome icons
+  /framer-motion/,
+  // Framer Motion (PresenceChild, AnimatePresence, etc.)
+  /sonner/,
+  // Sonner toast
+  /@radix-ui[\\/]/,
+  // Radix UI primitives
+  /@headlessui[\\/]/,
+  // Headless UI
+  /@mui[\\/]/,
+  // Material UI
+  /@chakra-ui[\\/]/,
+  // Chakra UI
+  /react-spring/,
+  // React Spring
+  /react-transition-group/,
+  // React Transition Group
+  /react-aria/,
+  // Adobe React Aria
+  /react-hook-form/,
+  /formik/
 ];
 function isFrameworkComponent(fiber, name) {
   if (FRAMEWORK_COMPONENT_NAMES.has(name)) return true;
@@ -1989,6 +2035,33 @@ function isFrameworkComponent(fiber, name) {
     }
   }
   return false;
+}
+var KNOWN_LIBRARY_NAMES = /* @__PURE__ */ new Map([
+  // Font Awesome
+  ["FontAwesomeIcon", "fontawesome"],
+  ["FontAwesomeLayers", "fontawesome"],
+  ["FontAwesomeLayersText", "fontawesome"],
+  // Framer Motion
+  ["AnimatePresence", "framer"],
+  ["LazyMotion", "framer"],
+  ["MotionConfig", "framer"],
+  ["PresenceChild", "framer"],
+  ["LayoutGroupContext", "framer"],
+  // Lottie
+  ["Lottie", "lottie"],
+  ["LottiePlayer", "lottie"],
+  // Heroicons / Lucide exported icons sometimes appear as named functions
+  ["HeroIcon", "heroicons"]
+]);
+function detectLibraryName(fiber, name) {
+  if (name.includes(".")) {
+    return name.split(".")[0].toLowerCase();
+  }
+  if (name.startsWith("__")) {
+    return "internal";
+  }
+  const known = KNOWN_LIBRARY_NAMES.get(name);
+  return known;
 }
 function buildNodeId(name, sameNameIndex, parentId) {
   const segment = `${name}-${sameNameIndex}`;
@@ -2052,6 +2125,7 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0, inSuspenseFal
         const isTransitionPending = detectTransitionPending(current) || void 0;
         const compilerStatus = detectCompilerStatus(current);
         const isServerComponent = detectServerComponent(current) || void 0;
+        const libraryName = framework ? void 0 : detectLibraryName(current, name);
         nodes.push({
           id: nodeId,
           name,
@@ -2070,7 +2144,9 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0, inSuspenseFal
           isTransitionPending,
           isSuspenseFallback: inSuspenseFallback || void 0,
           compilerStatus,
-          isServerComponent
+          isServerComponent,
+          isLibrary: libraryName !== void 0 || void 0,
+          libraryName
         });
       } else if (tag === FIBER_TAGS.HostText) {
       } else if (tag === FIBER_TAGS.SuspenseComponent) {

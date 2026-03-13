@@ -399,11 +399,20 @@ function isUserComponent(fiber: Fiber): boolean {
   // Filter FloTrace's own internal components (provider, profiler wrapper, HOC wrappers)
   if (name.startsWith("FloTrace")) return false;
 
-  // Filter library-style displayNames (e.g., "@mantine/core/Box", "@radix-ui/Popover")
-  // Libraries set displayName with package path — user components never have @ or /
+  // Filter library-style displayNames (e.g., "@mantine/core/Box", "@radix-ui/Popover").
+  // Libraries set displayName with the scoped package path — user components never do this.
+  // NOTE: This filters the *displayName* string, not the import path. A component `function Header()`
+  // imported from `@common/components/header.tsx` (monorepo scoped package) will have
+  // name = "Header" here, so it is NOT affected by this filter.
   if (name.startsWith("@") || name.includes("/")) return false;
 
-  // If _debugSource points to node_modules, it's a library component
+  // Filter React Compiler-generated cache variable names (e.g., "_c", "_T", "$r").
+  // These are short identifiers starting with _ or $ — not real component names; pure noise.
+  if (/^[$_][A-Za-z0-9]{0,3}$/.test(name)) return false;
+
+  // If _debugSource points to node_modules, it's a pre-bundled library component.
+  // Monorepo workspace packages in dev mode resolve via symlinks to their actual source paths
+  // (e.g., /workspace/packages/ui/src/Button.tsx), so they are NOT affected by this check.
   if (fiber._debugSource?.fileName?.includes("node_modules")) return false;
 
   return true;
@@ -416,30 +425,63 @@ function isUserComponent(fiber: Fiber): boolean {
 /**
  * Known framework/library wrapper component names.
  * These pass isUserComponent() but are framework internals users typically don't want to see.
+ *
+ * React 19 notes:
+ * - <Activity> replaces the old <Offscreen> experimental primitive
+ * - <ViewTransition> appears in Next.js 15 (which ships React 19) as a transition wrapper
+ * - Server Action context providers (ActionStateContext) are Next.js 15 internals
  */
 const FRAMEWORK_COMPONENT_NAMES: Set<string> = new Set([
-  // Next.js App Router internals
+  // Next.js App Router internals (Next.js 13–14)
   "InnerLayoutRouter", "OuterLayoutRouter", "HotReload", "RedirectBoundary",
   "NotFoundBoundary", "RenderFromTemplateContext", "ScrollAndFocusHandler",
   "AppRouter", "ServerRoot", "ReactDevOverlay", "PathnameContextProviderAdapter",
   "MetadataBoundary", "ViewportBoundary", "NotFoundErrorBoundary",
   "RedirectErrorBoundary", "InnerScrollAndFocusHandler", "GlobalError",
-  // React Router v6
+  // Next.js 15 / React 19 new internals
+  "ViewTransition",        // Next.js 15 shared-element transition wrapper
+  "ActionStateContext",    // Next.js 15 server action state context provider
+  "RequestCookiesProvider", "DraftModeProvider",
+  // React Router v6 / v7
   "Routes", "Route", "Router", "BrowserRouter", "HashRouter", "MemoryRouter",
   "Outlet", "Navigate", "RenderedRoute", "RouterProvider",
-  // Common wrappers
+  // React 19 built-in primitives
+  "Activity",              // React 19: show/hide subtrees while preserving state (was <Offscreen>)
+  // Common library wrappers
   "Suspense", "ErrorBoundary", "QueryClientProvider", "PersistGate",
 ]);
 
 /**
  * File path patterns indicating framework/library source.
+ * Checked against fiber._debugSource.fileName (dev mode only).
  */
 const FRAMEWORK_PATH_PATTERNS: RegExp[] = [
+  // React core / Next.js
   /next[\\/]dist/,
-  /react-router/,
   /react-dom/,
-  /@tanstack[\\/]/,
+  /[\\/]scheduler[\\/]/,    // React internal scheduler package
+  // Routing
+  /react-router/,            // React Router v6
+  /@react-router[\\/]/,     // React Router v7 (scoped package)
+  // State management
+  /@tanstack[\\/]/,          // TanStack Query / Table / Router / Form / Virtual
   /react-redux/,
+  /zustand/,
+  /jotai/,
+  /recoil/,
+  // UI component libraries (for when source maps are available)
+  /@fortawesome[\\/]/,       // Font Awesome icons
+  /framer-motion/,           // Framer Motion (PresenceChild, AnimatePresence, etc.)
+  /sonner/,                  // Sonner toast
+  /@radix-ui[\\/]/,          // Radix UI primitives
+  /@headlessui[\\/]/,        // Headless UI
+  /@mui[\\/]/,               // Material UI
+  /@chakra-ui[\\/]/,         // Chakra UI
+  /react-spring/,            // React Spring
+  /react-transition-group/,  // React Transition Group
+  /react-aria/,              // Adobe React Aria
+  /react-hook-form/,
+  /formik/,
 ];
 
 /**
@@ -457,6 +499,65 @@ function isFrameworkComponent(fiber: Fiber, name: string): boolean {
   }
 
   return false;
+}
+
+// ============================================================================
+// Library component detection
+// ============================================================================
+
+/**
+ * Well-known third-party library component names → short display label.
+ * Used as an explicit fallback when _debugSource is absent (pre-bundled library).
+ */
+const KNOWN_LIBRARY_NAMES = new Map<string, string>([
+  // Font Awesome
+  ['FontAwesomeIcon', 'fontawesome'],
+  ['FontAwesomeLayers', 'fontawesome'],
+  ['FontAwesomeLayersText', 'fontawesome'],
+  // Framer Motion
+  ['AnimatePresence', 'framer'],
+  ['LazyMotion', 'framer'],
+  ['MotionConfig', 'framer'],
+  ['PresenceChild', 'framer'],
+  ['LayoutGroupContext', 'framer'],
+  // Lottie
+  ['Lottie', 'lottie'],
+  ['LottiePlayer', 'lottie'],
+  // Heroicons / Lucide exported icons sometimes appear as named functions
+  ['HeroIcon', 'heroicons'],
+]);
+
+/**
+ * Detect if a component that passed isUserComponent() is actually a third-party library component.
+ * Returns a short library label if detected, undefined if it looks like user code.
+ *
+ * Detection strategies (in priority order):
+ * 1. Dot-notation displayName — library sub-component pattern (Radix, Sonner, Headless UI, etc.)
+ *    Libraries set displayName like "DropdownMenu.Item"; user components never do this.
+ * 2. Double-underscore markers — framework/library internal names ("__next_outlet_boundary__")
+ *    that slipped past isFrameworkComponent() (e.g., not yet in the known-names list).
+ * 3. Explicit KNOWN_LIBRARY_NAMES — canonical names for well-known pre-bundled components.
+ *
+ * NOTE: _debugSource absence is NOT used as a fallback. Next.js (SWC compiler) does not inject
+ * _debugSource into fiber nodes, so its absence cannot distinguish library from user code.
+ */
+function detectLibraryName(fiber: Fiber, name: string): string | undefined {
+  // Dot-notation: "ToastCollectionSlot.Slot", "Primitive.div", "DropdownMenu.Trigger"
+  if (name.includes('.')) {
+    return name.split('.')[0].toLowerCase();
+  }
+
+  // Double-underscore internal markers (framework/library internals)
+  if (name.startsWith('__')) {
+    return 'internal';
+  }
+
+  // Explicit known library names (pre-bundled components identifiable by name alone).
+  // NOTE: Do NOT fall back to "library" for all components missing _debugSource.
+  // Next.js uses SWC by default which does NOT inject _debugSource into fibers —
+  // absence of _debugSource is not a reliable signal across all bundlers.
+  const known = KNOWN_LIBRARY_NAMES.get(name);
+  return known;
 }
 
 /**
@@ -600,6 +701,9 @@ function walkFiber(
         const isTransitionPending = detectTransitionPending(current) || undefined;
         const compilerStatus = detectCompilerStatus(current);
         const isServerComponent = detectServerComponent(current) || undefined;
+        // Library detection: only run for non-framework components; framework components
+        // are already categorized and hidden/shown via the framework filter toggle.
+        const libraryName = framework ? undefined : detectLibraryName(current, name);
         nodes.push({
           id: nodeId,
           name,
@@ -619,6 +723,8 @@ function walkFiber(
           isSuspenseFallback: inSuspenseFallback || undefined,
           compilerStatus,
           isServerComponent,
+          isLibrary: libraryName !== undefined ? true : undefined,
+          libraryName,
         });
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
