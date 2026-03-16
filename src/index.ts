@@ -62,6 +62,10 @@ export { installTimelineTracker, uninstallTimelineTracker, recordTimelineEvent, 
 // Console capture tracker
 export { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
 
+// Network request tracker
+export { installNetworkTracker, uninstallNetworkTracker } from './networkTracker';
+export type { NetworkRequestEntry } from './types';
+
 // Utility for manual prop serialization
 export { serializeValue, serializeProps } from './serializer';
 

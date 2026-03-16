@@ -61,7 +61,7 @@ const NOISE_PATTERNS = [
   '<anonymous>',
 ];
 
-function isUserCodeFrame(fileName: string | null): boolean {
+export function isUserCodeFrame(fileName: string | null): boolean {
   if (!fileName) return false;
   for (const pattern of NOISE_PATTERNS) {
     if (fileName.includes(pattern)) return false;
@@ -69,7 +69,7 @@ function isUserCodeFrame(fileName: string | null): boolean {
   return true;
 }
 
-function captureStack(): StackFrame[] {
+export function captureStack(): StackFrame[] {
   const frames: StackFrame[] = [];
 
   try {

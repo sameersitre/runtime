@@ -102,7 +102,7 @@ function captureEntry(level: ConsoleLevel, args: unknown[]): void {
 
   // Enforce max buffer size (drop oldest)
   if (buffer.length > MAX_BUFFER_SIZE) {
-    buffer = buffer.slice(-MAX_BATCH_SIZE);
+    buffer = buffer.slice(-MAX_BUFFER_SIZE);
   }
 
   // Immediate flush if batch is full
@@ -113,15 +113,14 @@ function captureEntry(level: ConsoleLevel, args: unknown[]): void {
 
 /**
  * Attempt to attribute a console call to the currently rendering React component.
- * Uses React's __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentOwner.current
- * which points to the fiber currently being rendered (null between renders).
+ *
+ * Strategy 1 (React 18): __SECRET_INTERNALS...ReactCurrentOwner.current
+ * Strategy 2 (React 19): __CLIENT_INTERNALS...owner field (renamed + flattened)
+ * Both return the fiber currently being rendered (null between renders).
  */
 function getCurrentFiberAttribution(): Partial<Pick<ConsoleCaptureEntry, 'componentName' | 'ancestorChain'>> {
   try {
-    const internals = (window as unknown as Record<string, unknown>).__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED as
-      { ReactCurrentOwner?: { current: FiberLike | null } } | undefined;
-
-    const currentFiber = internals?.ReactCurrentOwner?.current;
+    const currentFiber = getCurrentRenderingFiber();
     if (!currentFiber) return {};
 
     const componentName = getComponentNameFromFiber(currentFiber);
@@ -136,8 +135,55 @@ function getCurrentFiberAttribution(): Partial<Pick<ConsoleCaptureEntry, 'compon
   }
 }
 
-// Minimal fiber shape for attribution (avoid importing full Fiber type)
-interface FiberLike {
+/**
+ * Get the currently rendering fiber across React 18 and 19.
+ * Exported so networkTracker can reuse the same attribution logic.
+ */
+export function getCurrentRenderingFiber(): FiberLike | null {
+  try {
+    const win = window as unknown as Record<string, unknown>;
+
+    // React 18: __SECRET_INTERNALS...ReactCurrentOwner.current
+    const secret = win.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED as
+      { ReactCurrentOwner?: { current: FiberLike | null } } | undefined;
+    if (secret?.ReactCurrentOwner?.current) return secret.ReactCurrentOwner.current;
+
+    // React 19: renamed + flattened — try known property names
+    const client = win.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE as
+      Record<string, unknown> | undefined;
+    if (client) {
+      // React 19 stores the current owner in a top-level property.
+      // Walk all values looking for something that looks like a fiber.
+      for (const val of Object.values(client)) {
+        if (isFiberLike(val)) return val as FiberLike;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Structural check for a React fiber node.
+ * Requires tag (number), type, return, AND memoizedState or stateNode
+ * to distinguish from non-fiber objects that happen to have tag/type/return.
+ */
+function isFiberLike(val: unknown): val is FiberLike {
+  if (!val || typeof val !== 'object') return false;
+  const obj = val as Record<string, unknown>;
+  return (
+    typeof obj.tag === 'number' &&
+    'type' in obj &&
+    'return' in obj &&
+    ('memoizedState' in obj || 'stateNode' in obj)
+  );
+}
+
+// Minimal fiber shape for attribution (avoid importing full Fiber type).
+// Exported so networkTracker can reuse the same attribution utilities.
+export interface FiberLike {
   type: {
     name?: string;
     displayName?: string;
@@ -150,8 +196,9 @@ interface FiberLike {
 
 /**
  * Extract display name from a fiber node.
+ * Exported for reuse by networkTracker attribution.
  */
-function getComponentNameFromFiber(fiber: FiberLike): string | null {
+export function getComponentNameFromFiber(fiber: FiberLike): string | null {
   const type = fiber.type;
   if (!type) return null;
 
@@ -178,8 +225,9 @@ function getComponentNameFromFiber(fiber: FiberLike): string | null {
 /**
  * Walk up the fiber tree to build an ancestor chain of component names.
  * Stops after 10 levels to prevent excessive traversal.
+ * Exported for reuse by networkTracker attribution.
  */
-function buildAncestorChain(fiber: FiberLike): string[] {
+export function buildAncestorChain(fiber: FiberLike): string[] {
   const chain: string[] = [];
   let current: FiberLike | null = fiber;
   const maxDepth = 10;

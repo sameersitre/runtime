@@ -44,6 +44,7 @@ __export(index_exports, {
   inspectHooks: () => inspectHooks,
   installConsoleTracker: () => installConsoleTracker,
   installFiberTreeWalker: () => installFiberTreeWalker,
+  installNetworkTracker: () => installNetworkTracker,
   installReduxTracker: () => installReduxTracker,
   installRouterTracker: () => installRouterTracker,
   installTanStackQueryTracker: () => installTanStackQueryTracker,
@@ -57,6 +58,7 @@ __export(index_exports, {
   serializeValue: () => serializeValue,
   uninstallConsoleTracker: () => uninstallConsoleTracker,
   uninstallFiberTreeWalker: () => uninstallFiberTreeWalker,
+  uninstallNetworkTracker: () => uninstallNetworkTracker,
   uninstallReduxTracker: () => uninstallReduxTracker,
   uninstallRouterTracker: () => uninstallRouterTracker,
   uninstallTanStackQueryTracker: () => uninstallTanStackQueryTracker,
@@ -1605,18 +1607,18 @@ function runAnalysis(tree, fiberRefMap2) {
     passthroughNodeIds: Array.from(passthroughNodeIdSet)
   };
 }
-function schedulePropDrillingAnalysis(tree, fiberRefMap2, client4) {
+function schedulePropDrillingAnalysis(tree, fiberRefMap2, client5) {
   if (analyzeTimer) clearTimeout(analyzeTimer);
   const now = Date.now();
   const elapsed = now - lastAnalysisTime;
   const delay = elapsed >= ANALYZE_INTERVAL_MS ? 0 : ANALYZE_INTERVAL_MS - elapsed;
   analyzeTimer = setTimeout(() => {
     analyzeTimer = null;
-    if (!client4.connected) return;
+    if (!client5.connected) return;
     try {
       lastAnalysisTime = Date.now();
       const { chains, passthroughNodeIds } = runAnalysis(tree, fiberRefMap2);
-      client4.sendImmediate({
+      client5.sendImmediate({
         type: "runtime:propDrilling",
         payload: {
           chains,
@@ -1669,7 +1671,7 @@ var SERVER_REFERENCE_PATTERNS = [
   /^RSC_/
 ];
 var detectionEmitted = false;
-function maybeEmitNextjsContext(client4) {
+function maybeEmitNextjsContext(client5) {
   if (detectionEmitted) return;
   try {
     const win = globalThis;
@@ -1690,7 +1692,7 @@ function maybeEmitNextjsContext(client4) {
       isAppRouter = hasNextRouter || !!win.__next_router_state_tree__;
     } catch {
     }
-    client4.sendImmediate({
+    client5.sendImmediate({
       type: "runtime:nextjsContext",
       detected: true,
       version,
@@ -1756,7 +1758,7 @@ function extractActionEntries(fiber) {
   }
   return entries.length > 0 ? entries : null;
 }
-function scanActionStateChanges(fiberRefMap2, client4) {
+function scanActionStateChanges(fiberRefMap2, client5) {
   try {
     for (const [nodeId, fiber] of fiberRefMap2) {
       const entries = extractActionEntries(fiber);
@@ -1765,7 +1767,7 @@ function scanActionStateChanges(fiberRefMap2, client4) {
       if (prevActionStateMap.get(nodeId) === snapshot) continue;
       prevActionStateMap.set(nodeId, snapshot);
       const componentName = nodeId.split("/").pop()?.replace(/-\d+$/, "") ?? "Unknown";
-      client4.send({
+      client5.send({
         type: "runtime:actionState",
         nodeId,
         componentName,
@@ -1814,10 +1816,10 @@ function extractRoute(url) {
 var originalFetch = null;
 var interceptorClient = null;
 var isInstalled2 = false;
-function installRscPayloadInterceptor(client4) {
+function installRscPayloadInterceptor(client5) {
   if (isInstalled2 || typeof globalThis.fetch !== "function") return;
   isInstalled2 = true;
-  interceptorClient = client4;
+  interceptorClient = client5;
   originalFetch = globalThis.fetch;
   globalThis.fetch = async function patchedFetch(input, init) {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -2215,7 +2217,7 @@ function walkFiber(fiber, parentId, sharedNameCountMap, depth = 0, inSuspenseFal
           isSuspenseFallback: inSuspenseFallback || void 0,
           compilerStatus,
           isServerComponent,
-          isLibrary: libraryName !== void 0 || void 0,
+          isLibrary: libraryName !== void 0 ? true : void 0,
           libraryName
         });
       } else if (tag === FIBER_TAGS.HostText) {
@@ -2417,8 +2419,8 @@ function executeSnapshot(root) {
     }
     const nodeCount = fiberRefMap.size;
     adaptSnapshotInterval(nodeCount);
-    const client4 = getWebSocketClient();
-    if (!client4.connected) {
+    const client5 = getWebSocketClient();
+    if (!client5.connected) {
       console.warn(
         "[FloTrace] WebSocket not connected, cannot send tree snapshot"
       );
@@ -2437,7 +2439,7 @@ function executeSnapshot(root) {
         "nextInterval:",
         snapshotIntervalMs + "ms"
       );
-      client4.sendImmediate({
+      client5.sendImmediate({
         type: "runtime:treeSnapshot",
         tree,
         timestamp: Date.now()
@@ -2457,7 +2459,7 @@ function executeSnapshot(root) {
           "updated:",
           diff.updated.length
         );
-        client4.sendImmediate({
+        client5.sendImmediate({
           type: "runtime:treeDiff",
           seq: diffSeq,
           added: diff.added,
@@ -2472,9 +2474,9 @@ function executeSnapshot(root) {
       }
     }
     previousFlatTree = currentFlatTree;
-    schedulePropDrillingAnalysis(tree, fiberRefMap, client4);
-    scanActionStateChanges(fiberRefMap, client4);
-    maybeEmitNextjsContext(client4);
+    schedulePropDrillingAnalysis(tree, fiberRefMap, client5);
+    scanActionStateChanges(fiberRefMap, client5);
+    maybeEmitNextjsContext(client5);
     snapshotCounter++;
   } catch (error) {
     console.error("[FloTrace] Error walking fiber tree:", error);
@@ -2589,8 +2591,8 @@ function installFiberTreeWalker() {
   }
   isInstalled3 = true;
   try {
-    const client4 = getWebSocketClient();
-    installRscPayloadInterceptor(client4);
+    const client5 = getWebSocketClient();
+    installRscPayloadInterceptor(client5);
   } catch {
   }
   const hook = window.__REACT_DEVTOOLS_GLOBAL_HOOK__;
@@ -2612,15 +2614,15 @@ function installFiberTreeWalker() {
       }
       if (rendererID !== hookedRendererID) return;
       try {
-        const client4 = getWebSocketClient();
-        if (client4.connected) {
+        const client5 = getWebSocketClient();
+        if (client5.connected) {
           const triggers = peekTriggers();
           for (const trigger of triggers) {
-            client4.sendImmediate({ type: "runtime:renderTrigger", trigger });
+            client5.sendImmediate({ type: "runtime:renderTrigger", trigger });
           }
           const cascade = analyzeCascade(root, triggers);
           if (cascade) {
-            client4.sendImmediate({ type: "runtime:renderCascade", cascade });
+            client5.sendImmediate({ type: "runtime:renderCascade", cascade });
           }
           wrapFiberDispatchers(root);
           clearTriggers();
@@ -2831,7 +2833,7 @@ var activeUnsubscribers = [];
 var isInstalled4 = false;
 var debounceTimers = /* @__PURE__ */ new Map();
 var DEBOUNCE_MS = 200;
-function installZustandTracker(stores, client4) {
+function installZustandTracker(stores, client5) {
   if (isInstalled4) {
     console.warn("[FloTrace] Zustand tracker already installed, reinstalling");
     uninstallZustandTracker();
@@ -2847,10 +2849,10 @@ function installZustandTracker(stores, client4) {
     }
     try {
       const initialState = store.getState();
-      sendStoreUpdate(storeName, initialState, Object.keys(initialState), client4);
+      sendStoreUpdate(storeName, initialState, Object.keys(initialState), client5);
       const unsubscribe = store.subscribe((newState, prevState) => {
         try {
-          scheduleStoreUpdate(storeName, prevState, newState, client4);
+          scheduleStoreUpdate(storeName, prevState, newState, client5);
         } catch (error) {
           console.error(`[FloTrace] Error in Zustand subscribe callback for "${storeName}":`, error);
         }
@@ -2878,7 +2880,7 @@ function uninstallZustandTracker() {
   isInstalled4 = false;
   console.log("[FloTrace] Zustand tracker uninstalled");
 }
-function scheduleStoreUpdate(storeName, prevState, newState, client4) {
+function scheduleStoreUpdate(storeName, prevState, newState, client5) {
   let changedKeys;
   try {
     changedKeys = getChangedKeys(prevState, newState);
@@ -2891,13 +2893,13 @@ function scheduleStoreUpdate(storeName, prevState, newState, client4) {
   if (existing) clearTimeout(existing);
   debounceTimers.set(storeName, setTimeout(() => {
     debounceTimers.delete(storeName);
-    sendStoreUpdate(storeName, newState, changedKeys, client4);
+    sendStoreUpdate(storeName, newState, changedKeys, client5);
   }, DEBOUNCE_MS));
 }
-function sendStoreUpdate(storeName, state, changedKeys, client4) {
+function sendStoreUpdate(storeName, state, changedKeys, client5) {
   try {
-    if (!client4.connected) return;
-    client4.sendImmediate({
+    if (!client5.connected) return;
+    client5.sendImmediate({
       type: "runtime:zustand",
       storeName,
       state: serializeStoreState(state, `Zustand "${storeName}"`),
@@ -2918,7 +2920,7 @@ var DEBOUNCE_MS2 = 200;
 function isReduxStore(obj) {
   return typeof obj === "object" && obj !== null && typeof obj.getState === "function" && typeof obj.subscribe === "function" && typeof obj.dispatch === "function";
 }
-function installReduxTracker(store, client4) {
+function installReduxTracker(store, client5) {
   if (isInstalled5) {
     console.warn("[FloTrace] Redux tracker already installed, reinstalling");
     uninstallReduxTracker();
@@ -2928,11 +2930,11 @@ function installReduxTracker(store, client4) {
   try {
     const initialState = store.getState();
     previousState = initialState;
-    sendReduxUpdate(initialState, Object.keys(initialState), client4);
+    sendReduxUpdate(initialState, Object.keys(initialState), client5);
     activeUnsubscribe = store.subscribe(() => {
       try {
         const newState = store.getState();
-        scheduleReduxUpdate(newState, client4);
+        scheduleReduxUpdate(newState, client5);
       } catch (error) {
         console.error("[FloTrace] Error in Redux subscribe callback:", error);
       }
@@ -2960,7 +2962,7 @@ function uninstallReduxTracker() {
   isInstalled5 = false;
   console.log("[FloTrace] Redux tracker uninstalled");
 }
-function scheduleReduxUpdate(newState, client4) {
+function scheduleReduxUpdate(newState, client5) {
   let changedKeys;
   try {
     changedKeys = getChangedKeys(previousState ?? {}, newState);
@@ -2973,13 +2975,13 @@ function scheduleReduxUpdate(newState, client4) {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
-    sendReduxUpdate(newState, changedKeys, client4);
+    sendReduxUpdate(newState, changedKeys, client5);
   }, DEBOUNCE_MS2);
 }
-function sendReduxUpdate(state, changedKeys, client4) {
+function sendReduxUpdate(state, changedKeys, client5) {
   try {
-    if (!client4.connected) return;
-    client4.sendImmediate({
+    if (!client5.connected) return;
+    client5.sendImmediate({
       type: "runtime:redux",
       state: serializeStoreState(state, "Redux"),
       changedKeys,
@@ -3010,7 +3012,7 @@ function isTanStackQueryClient(obj) {
   const candidate = obj;
   return typeof candidate.getQueryCache === "function" && typeof candidate.getMutationCache === "function";
 }
-function installTanStackQueryTracker(queryClient, client4) {
+function installTanStackQueryTracker(queryClient, client5) {
   if (isInstalled6) {
     console.warn("[FloTrace] TanStack Query tracker already installed, reinstalling");
     uninstallTanStackQueryTracker();
@@ -3028,14 +3030,14 @@ function installTanStackQueryTracker(queryClient, client4) {
     for (const mutation of mutationCache.getAll()) {
       mutationPrevStatus.set(mutation.mutationId, mutation.state.status);
     }
-    sendSnapshot(queryCache, mutationCache, client4);
+    sendSnapshot(queryCache, mutationCache, client5);
     queryUnsubscribe = queryCache.subscribe((event) => {
       try {
         if (event.type === "added" || event.type === "removed" || event.type === "updated") {
           if (event.query) {
             updateQueryTracking(event.query, event.type);
           }
-          scheduleSnapshot2(queryCache, mutationCache, client4);
+          scheduleSnapshot2(queryCache, mutationCache, client5);
         }
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Query cache subscribe callback:", error);
@@ -3044,9 +3046,9 @@ function installTanStackQueryTracker(queryClient, client4) {
     mutationUnsubscribe = mutationCache.subscribe((event) => {
       try {
         if (event.mutation) {
-          updateMutationTracking(event.mutation, queryCache, mutationCache, client4);
+          updateMutationTracking(event.mutation, queryCache, mutationCache, client5);
         }
-        scheduleSnapshot2(queryCache, mutationCache, client4);
+        scheduleSnapshot2(queryCache, mutationCache, client5);
       } catch (error) {
         console.error("[FloTrace] Error in TanStack Mutation cache subscribe callback:", error);
       }
@@ -3157,7 +3159,7 @@ function updateQueryTracking(query, eventType) {
     tracking.prevFetchStatus = currentFetchStatus;
   }
 }
-function openCorrelationWindow(mutation, queryCache, mutationCache, client4) {
+function openCorrelationWindow(mutation, queryCache, mutationCache, client5) {
   const correlationId = `corr-${++correlationCounter}`;
   const now = Date.now();
   const idleQueryHashes = /* @__PURE__ */ new Set();
@@ -3167,7 +3169,7 @@ function openCorrelationWindow(mutation, queryCache, mutationCache, client4) {
     }
   }
   const timeoutId = setTimeout(() => {
-    resolveCorrelation(correlationId, queryCache, mutationCache, client4);
+    resolveCorrelation(correlationId, queryCache, mutationCache, client5);
   }, CORRELATION_WINDOW_MS);
   pendingCorrelations.set(correlationId, {
     correlationId,
@@ -3180,7 +3182,7 @@ function openCorrelationWindow(mutation, queryCache, mutationCache, client4) {
   });
   mutationCorrelationMap.set(mutation.mutationId, correlationId);
 }
-function resolveCorrelation(correlationId, queryCache, mutationCache, client4) {
+function resolveCorrelation(correlationId, queryCache, mutationCache, client5) {
   const pending = pendingCorrelations.get(correlationId);
   if (!pending) return;
   pendingCorrelations.delete(correlationId);
@@ -3223,21 +3225,21 @@ function resolveCorrelation(correlationId, queryCache, mutationCache, client4) {
   if (completedCorrelations.length > MAX_COMPLETED_CORRELATIONS) {
     completedCorrelations = completedCorrelations.slice(-MAX_COMPLETED_CORRELATIONS);
   }
-  scheduleSnapshot2(queryCache, mutationCache, client4);
+  scheduleSnapshot2(queryCache, mutationCache, client5);
 }
-function updateMutationTracking(mutation, queryCache, mutationCache, client4) {
+function updateMutationTracking(mutation, queryCache, mutationCache, client5) {
   const currentStatus = mutation.state.status;
   const prevStatus = mutationPrevStatus.get(mutation.mutationId);
   mutationPrevStatus.set(mutation.mutationId, currentStatus);
   if (prevStatus && prevStatus !== "success" && currentStatus === "success") {
-    openCorrelationWindow(mutation, queryCache, mutationCache, client4);
+    openCorrelationWindow(mutation, queryCache, mutationCache, client5);
   }
 }
-function scheduleSnapshot2(queryCache, mutationCache, client4) {
+function scheduleSnapshot2(queryCache, mutationCache, client5) {
   if (debounceTimer2) clearTimeout(debounceTimer2);
   debounceTimer2 = setTimeout(() => {
     debounceTimer2 = null;
-    sendSnapshot(queryCache, mutationCache, client4);
+    sendSnapshot(queryCache, mutationCache, client5);
   }, DEBOUNCE_MS3);
 }
 function serializeQueryData(data) {
@@ -3318,9 +3320,9 @@ function serializeMutation(mutation) {
     lastCorrelationId: mutationCorrelationMap.get(mutation.mutationId)
   };
 }
-function sendSnapshot(queryCache, mutationCache, client4) {
+function sendSnapshot(queryCache, mutationCache, client5) {
   try {
-    if (!client4.connected) return;
+    if (!client5.connected) return;
     const queries = [];
     for (const query of queryCache.getAll()) {
       try {
@@ -3349,7 +3351,7 @@ function sendSnapshot(queryCache, mutationCache, client4) {
     if (correlations) {
       completedCorrelations = [];
     }
-    client4.sendImmediate({
+    client5.sendImmediate({
       type: "runtime:tanstackQuery",
       queries,
       mutations,
@@ -3546,7 +3548,7 @@ function captureEntry(level, args) {
   };
   buffer.push(entry);
   if (buffer.length > MAX_BUFFER_SIZE) {
-    buffer = buffer.slice(-MAX_BATCH_SIZE);
+    buffer = buffer.slice(-MAX_BUFFER_SIZE);
   }
   if (buffer.length >= MAX_BATCH_SIZE) {
     flushBuffer();
@@ -3554,8 +3556,7 @@ function captureEntry(level, args) {
 }
 function getCurrentFiberAttribution() {
   try {
-    const internals = window.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
-    const currentFiber = internals?.ReactCurrentOwner?.current;
+    const currentFiber = getCurrentRenderingFiber();
     if (!currentFiber) return {};
     const componentName = getComponentNameFromFiber(currentFiber);
     const ancestorChain = buildAncestorChain(currentFiber);
@@ -3566,6 +3567,27 @@ function getCurrentFiberAttribution() {
   } catch {
     return {};
   }
+}
+function getCurrentRenderingFiber() {
+  try {
+    const win = window;
+    const secret = win.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED;
+    if (secret?.ReactCurrentOwner?.current) return secret.ReactCurrentOwner.current;
+    const client5 = win.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+    if (client5) {
+      for (const val of Object.values(client5)) {
+        if (isFiberLike(val)) return val;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function isFiberLike(val) {
+  if (!val || typeof val !== "object") return false;
+  const obj = val;
+  return typeof obj.tag === "number" && "type" in obj && "return" in obj && ("memoizedState" in obj || "stateNode" in obj);
 }
 function getComponentNameFromFiber(fiber) {
   const type = fiber.type;
@@ -3607,6 +3629,303 @@ function flushBuffer() {
   buffer = [];
 }
 
+// src/networkTracker.ts
+var MAX_BATCH_SIZE2 = 50;
+var FLUSH_INTERVAL_MS3 = 500;
+var MAX_BUFFER_SIZE2 = 300;
+var DEDUPE_WINDOW_MS = 5e3;
+var MAX_ANCESTOR_CHAIN = 3;
+var NOISE_URL_PATTERNS = [
+  // Analytics & tracking
+  /google-analytics\.com/i,
+  /googletagmanager\.com/i,
+  /facebook\.com\/tr/i,
+  /segment\.io/i,
+  /mixpanel\.com/i,
+  /amplitude\.com/i,
+  /hotjar\.com/i,
+  /fullstory\.com/i,
+  /sentry\.io/i,
+  /bugsnag\.com/i,
+  /datadog/i,
+  /clarity\.ms/i,
+  /plausible\.io/i,
+  // Development tools
+  /webpack-dev-server/i,
+  /__webpack_hmr/i,
+  /\.hot-update\./i,
+  /\.map$/,
+  /sourcemap/i,
+  /__nextjs_original-stack-frame/i,
+  /__nextjs_launch-editor/i,
+  /on-demand-entries-ping/i,
+  // Browser resources
+  /favicon\.ico/i,
+  /robots\.txt/i,
+  /manifest\.json/i,
+  /service-worker/i,
+  /sw\.js/i,
+  // Static assets
+  /\/_next\/static\//i,
+  /\/_next\/image/i,
+  // FloTrace's own WebSocket
+  /127\.0\.0\.1:3457/,
+  // Chrome extensions
+  /chrome-extension:/i,
+  /moz-extension:/i
+];
+var client4 = null;
+var isInstalled9 = false;
+var buffer2 = [];
+var flushTimer3 = null;
+var requestCounter = 0;
+var requestIndexMap = /* @__PURE__ */ new Map();
+var previousFetch = null;
+var originalXhrOpen = null;
+var originalXhrSend = null;
+var dedupeWindow = /* @__PURE__ */ new Map();
+function installNetworkTracker(wsClient) {
+  if (isInstalled9) return;
+  client4 = wsClient;
+  isInstalled9 = true;
+  requestCounter = 0;
+  patchFetch();
+  patchXhr();
+  flushTimer3 = setInterval(flushBuffer2, FLUSH_INTERVAL_MS3);
+}
+function uninstallNetworkTracker() {
+  if (!isInstalled9) return;
+  if (previousFetch) {
+    globalThis.fetch = previousFetch;
+    previousFetch = null;
+  }
+  if (originalXhrOpen) {
+    XMLHttpRequest.prototype.open = originalXhrOpen;
+    originalXhrOpen = null;
+  }
+  if (originalXhrSend) {
+    XMLHttpRequest.prototype.send = originalXhrSend;
+    originalXhrSend = null;
+  }
+  if (flushTimer3) {
+    clearInterval(flushTimer3);
+    flushTimer3 = null;
+  }
+  flushBuffer2();
+  buffer2 = [];
+  requestIndexMap.clear();
+  dedupeWindow.clear();
+  client4 = null;
+  isInstalled9 = false;
+}
+function patchFetch() {
+  if (typeof globalThis.fetch !== "function") return;
+  previousFetch = globalThis.fetch;
+  globalThis.fetch = async function trackedFetch(input, init) {
+    const url = extractUrl(input);
+    if (isNoiseUrl(url)) {
+      return previousFetch.call(globalThis, input, init);
+    }
+    const method = (init?.method ?? "GET").toUpperCase();
+    const parsedUrl = parseUrl(url);
+    const entry = createEntry(method, parsedUrl, init);
+    const startTime = performance.now();
+    if (init?.signal) {
+      init.signal.addEventListener("abort", () => {
+        entry.state = "aborted";
+        entry.durationMs = performance.now() - startTime;
+        pushEntry(entry);
+      }, { once: true });
+    }
+    pushEntry({ ...entry });
+    try {
+      const response = await previousFetch.call(globalThis, input, init);
+      if (entry.state !== "aborted") {
+        entry.state = response.ok ? "success" : "error";
+        entry.status = response.status;
+        entry.durationMs = performance.now() - startTime;
+        entry.responseSizeBytes = parseContentLength(response.headers);
+        if (!response.ok) {
+          entry.errorMessage = `${response.status} ${response.statusText}`;
+        }
+        pushEntry(entry);
+      }
+      return response;
+    } catch (err) {
+      if (entry.state !== "aborted") {
+        entry.state = "error";
+        entry.durationMs = performance.now() - startTime;
+        entry.errorMessage = err instanceof Error ? err.message : String(err);
+        pushEntry(entry);
+      }
+      throw err;
+    }
+  };
+}
+function patchXhr() {
+  if (typeof XMLHttpRequest === "undefined") return;
+  originalXhrOpen = XMLHttpRequest.prototype.open;
+  originalXhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__ftMethod = method.toUpperCase();
+    this.__ftUrl = typeof url === "string" ? url : url.href;
+    return originalXhrOpen.apply(this, [method, url, ...rest]);
+  };
+  XMLHttpRequest.prototype.send = function(body) {
+    const meta = this;
+    const url = meta.__ftUrl ?? "";
+    if (isNoiseUrl(url)) {
+      return originalXhrSend.call(this, body);
+    }
+    const method = meta.__ftMethod ?? "GET";
+    const parsedUrl = parseUrl(url);
+    const entry = createEntry(method, parsedUrl);
+    const startTime = performance.now();
+    pushEntry({ ...entry });
+    this.addEventListener("load", () => {
+      entry.state = this.status >= 400 ? "error" : "success";
+      entry.status = this.status;
+      entry.durationMs = performance.now() - startTime;
+      entry.responseSizeBytes = parseXhrContentLength(this);
+      if (this.status >= 400) {
+        entry.errorMessage = `${this.status} ${this.statusText}`;
+      }
+      pushEntry(entry);
+    });
+    this.addEventListener("error", () => {
+      entry.state = "error";
+      entry.durationMs = performance.now() - startTime;
+      entry.errorMessage = "Network error";
+      pushEntry(entry);
+    });
+    this.addEventListener("abort", () => {
+      entry.state = "aborted";
+      entry.durationMs = performance.now() - startTime;
+      pushEntry(entry);
+    });
+    return originalXhrSend.call(this, body);
+  };
+}
+function createEntry(method, parsedUrl, init) {
+  const requestId = String(++requestCounter);
+  const dedupeKey = `${method}:${parsedUrl.path}`;
+  const attribution = getAttribution();
+  const isServerAction = hasHeader(init, "Next-Action");
+  const isPrefetch = hasHeader(init, "Next-Router-Prefetch");
+  const now = Date.now();
+  const isDuplicate = checkDuplicate(dedupeKey, now);
+  return {
+    requestId,
+    method,
+    urlPath: parsedUrl.path,
+    urlHost: parsedUrl.host,
+    status: 0,
+    durationMs: null,
+    responseSizeBytes: null,
+    componentName: attribution.componentName,
+    ancestorChain: attribution.ancestorChain,
+    initiatedDuringRender: attribution.duringRender,
+    initiatedInEffect: attribution.inEffect,
+    state: "pending",
+    dedupeKey,
+    isDuplicate: isDuplicate || void 0,
+    isServerAction: isServerAction || void 0,
+    isPrefetch: isPrefetch || void 0,
+    timestamp: now
+  };
+}
+function getAttribution() {
+  const fiber = getCurrentRenderingFiber();
+  if (fiber) {
+    const name = getComponentNameFromFiber(fiber);
+    const ancestors = buildAncestorChain(fiber).slice(-MAX_ANCESTOR_CHAIN);
+    return {
+      componentName: name || void 0,
+      ancestorChain: ancestors.length > 0 ? ancestors : void 0,
+      duringRender: true,
+      inEffect: false
+    };
+  }
+  return { duringRender: false, inEffect: false };
+}
+function extractUrl(input) {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+function parseUrl(url) {
+  try {
+    const u = new URL(url, globalThis.location?.href ?? "http://localhost");
+    return { path: u.pathname, host: u.host };
+  } catch {
+    return { path: url.split("?")[0] ?? url, host: "" };
+  }
+}
+function isNoiseUrl(url) {
+  return NOISE_URL_PATTERNS.some((p) => p.test(url));
+}
+function parseContentLength(headers) {
+  const cl = headers.get("content-length");
+  if (!cl) return null;
+  const n = parseInt(cl, 10);
+  return isNaN(n) ? null : n;
+}
+function parseXhrContentLength(xhr) {
+  const cl = xhr.getResponseHeader("content-length");
+  if (!cl) return null;
+  const n = parseInt(cl, 10);
+  return isNaN(n) ? null : n;
+}
+function hasHeader(init, name) {
+  if (!init?.headers) return false;
+  if (init.headers instanceof Headers) return init.headers.has(name);
+  if (Array.isArray(init.headers)) return init.headers.some(([k]) => k.toLowerCase() === name.toLowerCase());
+  if (typeof init.headers === "object") {
+    return Object.keys(init.headers).some((k) => k.toLowerCase() === name.toLowerCase());
+  }
+  return false;
+}
+function checkDuplicate(dedupeKey, now) {
+  for (const [key, ts] of dedupeWindow) {
+    if (now - ts > DEDUPE_WINDOW_MS) dedupeWindow.delete(key);
+  }
+  const isDup = dedupeWindow.has(dedupeKey);
+  dedupeWindow.set(dedupeKey, now);
+  return isDup;
+}
+function pushEntry(entry) {
+  const existingIdx = requestIndexMap.get(entry.requestId);
+  if (existingIdx !== void 0 && existingIdx < buffer2.length && buffer2[existingIdx]?.requestId === entry.requestId) {
+    buffer2[existingIdx] = entry;
+  } else {
+    requestIndexMap.set(entry.requestId, buffer2.length);
+    buffer2.push(entry);
+  }
+  if (buffer2.length > MAX_BUFFER_SIZE2) {
+    buffer2 = buffer2.slice(-MAX_BUFFER_SIZE2);
+    rebuildRequestIndex();
+  }
+  if (buffer2.length >= MAX_BATCH_SIZE2) {
+    flushBuffer2();
+  }
+}
+function rebuildRequestIndex() {
+  requestIndexMap.clear();
+  for (let i = 0; i < buffer2.length; i++) {
+    requestIndexMap.set(buffer2[i].requestId, i);
+  }
+}
+function flushBuffer2() {
+  if (buffer2.length === 0 || !client4?.connected) return;
+  client4.send({
+    type: "runtime:networkRequest",
+    requests: [...buffer2],
+    timestamp: Date.now()
+  });
+  buffer2 = [];
+  requestIndexMap.clear();
+}
+
 // src/FloTraceProvider.tsx
 var import_jsx_runtime = require("react/jsx-runtime");
 var pendingCleanupTimer = null;
@@ -3632,52 +3951,59 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
       clearTimeout(pendingCleanupTimer);
       pendingCleanupTimer = null;
     }
-    const client4 = getWebSocketClient(mergedConfig);
+    const client5 = getWebSocketClient(mergedConfig);
     installFiberTreeWalker();
-    const unsubConnection = client4.onConnectionChange((isConnected) => {
+    const unsubConnection = client5.onConnectionChange((isConnected) => {
       setConnected(isConnected);
       if (isConnected) {
         requestFullSnapshot();
       }
     });
-    const unsubMessage = client4.onMessage((message) => {
+    const unsubMessage = client5.onMessage((message) => {
       try {
         switch (message.type) {
           case "ext:ping":
-            client4.sendImmediate({ type: "runtime:ready", appName: mergedConfig.appName });
+            client5.sendImmediate({ type: "runtime:ready", appName: mergedConfig.appName });
             break;
           case "ext:startTracking":
             trackingOptionsRef.current = message.options || {};
             if (message.options?.trackZustand && storesRef.current && Object.keys(storesRef.current).length > 0) {
               try {
-                installZustandTracker(storesRef.current, client4);
+                installZustandTracker(storesRef.current, client5);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Zustand tracker:", error);
               }
             }
             if (message.options?.trackRedux && reduxStoreRef.current) {
               try {
-                installReduxTracker(reduxStoreRef.current, client4);
+                installReduxTracker(reduxStoreRef.current, client5);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Redux tracker:", error);
               }
             }
             if (message.options?.trackTanstackQuery && queryClientRef.current) {
               try {
-                installTanStackQueryTracker(queryClientRef.current, client4);
+                installTanStackQueryTracker(queryClientRef.current, client5);
               } catch (error) {
                 console.error("[FloTrace] Failed to install TanStack Query tracker:", error);
               }
             }
             if (message.options?.trackRouter) {
               try {
-                installRouterTracker(client4);
+                installRouterTracker(client5);
               } catch (error) {
                 console.error("[FloTrace] Failed to install Router tracker:", error);
               }
             }
+            if (message.options?.trackNetwork) {
+              try {
+                installNetworkTracker(client5);
+              } catch (error) {
+                console.error("[FloTrace] Failed to install Network tracker:", error);
+              }
+            }
             try {
-              installTimelineTracker(client4);
+              installTimelineTracker(client5);
             } catch (error) {
               console.error("[FloTrace] Failed to install Timeline tracker:", error);
             }
@@ -3715,6 +4041,11 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             } catch (e) {
               console.error("[FloTrace] Error uninstalling Console tracker:", e);
             }
+            try {
+              uninstallNetworkTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error uninstalling Network tracker:", e);
+            }
             console.log("[FloTrace] Tracking stopped");
             break;
           case "ext:startTreeTracking":
@@ -3728,7 +4059,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             const nodeId = message.nodeId;
             if (nodeId) {
               const props = getNodeProps(nodeId);
-              client4.sendImmediate({
+              client5.sendImmediate({
                 type: "runtime:nodeProps",
                 nodeId,
                 props: props || {},
@@ -3741,7 +4072,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             const hookNodeId = message.nodeId;
             if (hookNodeId) {
               const hooks = getNodeHooks(hookNodeId);
-              client4.sendImmediate({
+              client5.sendImmediate({
                 type: "runtime:nodeHooks",
                 nodeId: hookNodeId,
                 hooks: hooks || [],
@@ -3754,7 +4085,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             const effectNodeId = message.nodeId;
             if (effectNodeId) {
               const effects = getNodeEffects(effectNodeId);
-              client4.sendImmediate({
+              client5.sendImmediate({
                 type: "runtime:nodeEffects",
                 nodeId: effectNodeId,
                 effects: effects || [],
@@ -3768,7 +4099,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
             if (reasonNodeId) {
               const reason = getDetailedRenderReason(reasonNodeId);
               if (reason) {
-                client4.sendImmediate({
+                client5.sendImmediate({
                   type: "runtime:detailedRenderReason",
                   nodeId: reasonNodeId,
                   reason,
@@ -3788,7 +4119,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
               const events = getTimeline(timelineNodeId);
               const componentName = timelineNodeId.split("/").pop()?.replace(/-\d+$/, "") ?? "Unknown";
               for (const event of events) {
-                client4.sendImmediate({
+                client5.sendImmediate({
                   type: "runtime:timelineEvent",
                   nodeId: timelineNodeId,
                   componentName,
@@ -3800,7 +4131,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
           }
           case "ext:startConsoleCapture":
             try {
-              installConsoleTracker(client4);
+              installConsoleTracker(client5);
               console.log("[FloTrace] Console capture started");
             } catch (error) {
               console.error("[FloTrace] Failed to install Console tracker:", error);
@@ -3814,6 +4145,22 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
               console.error("[FloTrace] Error stopping Console tracker:", error);
             }
             break;
+          case "ext:startNetworkCapture":
+            try {
+              installNetworkTracker(client5);
+              console.log("[FloTrace] Network capture started");
+            } catch (error) {
+              console.error("[FloTrace] Failed to install Network tracker:", error);
+            }
+            break;
+          case "ext:stopNetworkCapture":
+            try {
+              uninstallNetworkTracker();
+              console.log("[FloTrace] Network capture stopped");
+            } catch (error) {
+              console.error("[FloTrace] Error stopping Network tracker:", error);
+            }
+            break;
           case "ext:requestState":
             break;
         }
@@ -3821,7 +4168,7 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
         console.error(`[FloTrace] Error handling message type "${message.type}":`, error);
       }
     });
-    client4.connect();
+    client5.connect();
     return () => {
       unsubConnection();
       unsubMessage();
@@ -3863,6 +4210,11 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
           console.error("[FloTrace] Error during cleanup (consoleTracker):", e);
         }
         try {
+          uninstallNetworkTracker();
+        } catch (e) {
+          console.error("[FloTrace] Error during cleanup (networkTracker):", e);
+        }
+        try {
           disposeWebSocketClient();
         } catch (e) {
           console.error("[FloTrace] Error during cleanup (websocketClient):", e);
@@ -3875,12 +4227,12 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
       if (!mergedConfig.enabled) {
         return;
       }
-      const client4 = getWebSocketClient();
-      if (!client4.connected) {
+      const client5 = getWebSocketClient();
+      if (!client5.connected) {
         return;
       }
       const normalizedPhase = phase === "nested-update" ? "update" : phase;
-      client4.send({
+      client5.send({
         type: "runtime:render",
         componentName: id,
         phase: normalizedPhase,
@@ -3909,12 +4261,12 @@ function withFloTrace(Component, displayName) {
         if (!floTrace?.enabled) {
           return;
         }
-        const client4 = getWebSocketClient();
-        if (!client4.connected) {
+        const client5 = getWebSocketClient();
+        if (!client5.connected) {
           return;
         }
         const normalizedPhase = phase === "nested-update" ? "update" : phase;
-        client4.send({
+        client5.send({
           type: "runtime:render",
           componentName: id,
           phase: normalizedPhase,
@@ -3923,7 +4275,7 @@ function withFloTrace(Component, displayName) {
           timestamp: commitTime
         });
         if (floTrace.config.includeProps) {
-          client4.send({
+          client5.send({
             type: "runtime:props",
             componentName: id,
             props: serializeProps(props),
@@ -3947,13 +4299,13 @@ function useTrackProps(componentName, props) {
       if (!floTrace?.enabled || !floTrace.config.includeProps) {
         return;
       }
-      const client4 = getWebSocketClient();
-      if (!client4.connected) {
+      const client5 = getWebSocketClient();
+      if (!client5.connected) {
         return;
       }
       const changedKeys = getChangedKeys(prevPropsRef.current, props);
       if (changedKeys.length > 0) {
-        client4.send({
+        client5.send({
           type: "runtime:props",
           componentName,
           props: serializeProps(props),
@@ -3984,6 +4336,7 @@ function useTrackProps(componentName, props) {
   inspectHooks,
   installConsoleTracker,
   installFiberTreeWalker,
+  installNetworkTracker,
   installReduxTracker,
   installRouterTracker,
   installTanStackQueryTracker,
@@ -3997,6 +4350,7 @@ function useTrackProps(componentName, props) {
   serializeValue,
   uninstallConsoleTracker,
   uninstallFiberTreeWalker,
+  uninstallNetworkTracker,
   uninstallReduxTracker,
   uninstallRouterTracker,
   uninstallTanStackQueryTracker,

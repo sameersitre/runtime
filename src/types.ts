@@ -49,7 +49,8 @@ export type RuntimeMessage =
   | RuntimeOptimisticDiffMessage
   | RuntimeNextjsContextMessage
   | RuntimeRscPayloadMessage
-  | RuntimeHydrationEventMessage;
+  | RuntimeHydrationEventMessage
+  | RuntimeNetworkRequestMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -682,6 +683,57 @@ export interface RuntimeHydrationEventMessage {
   timestamp: number;
 }
 
+// ============================================================================
+// Network Request Tracking
+// ============================================================================
+
+/** Metadata for a single intercepted network request. Privacy-first: no bodies, no query params, no auth headers. */
+export interface NetworkRequestEntry {
+  /** Incrementing request ID */
+  requestId: string;
+  /** HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) */
+  method: string;
+  /** URL path only — query params stripped for privacy */
+  urlPath: string;
+  /** URL host for endpoint grouping */
+  urlHost: string;
+  /** HTTP status code (0 if pending/aborted) */
+  status: number;
+  /** Request duration in ms (null if still pending) */
+  durationMs: number | null;
+  /** Response size from Content-Length header (null if unavailable) */
+  responseSizeBytes: number | null;
+  /** React component that initiated this request (if attributable) */
+  componentName?: string;
+  /** Ancestor chain of the initiating component (last 3) */
+  ancestorChain?: string[];
+  /** True if fetch was called during React render phase (anti-pattern) */
+  initiatedDuringRender: boolean;
+  /** True if fetch was called inside a useEffect callback */
+  initiatedInEffect: boolean;
+  /** Request lifecycle state */
+  state: 'pending' | 'success' | 'error' | 'aborted';
+  /** Deduplication key: `${method}:${normalizedPath}` for duplicate detection */
+  dedupeKey: string;
+  /** True if another request with same dedupeKey was made within 2s */
+  isDuplicate?: boolean;
+  /** True if this is a Next.js Server Action (POST with Next-Action header) */
+  isServerAction?: boolean;
+  /** True if this is a Next.js RSC prefetch (Next-Router-Prefetch header) */
+  isPrefetch?: boolean;
+  /** Error message if request failed */
+  errorMessage?: string;
+  /** Timestamp (Date.now()) */
+  timestamp: number;
+}
+
+/** Batched network request message sent to FloTrace server */
+export interface RuntimeNetworkRequestMessage {
+  type: 'runtime:networkRequest';
+  requests: NetworkRequestEntry[];
+  timestamp: number;
+}
+
 /**
  * Messages received from extension
  */
@@ -699,7 +751,9 @@ export type ExtensionToRuntimeMessage =
   | { type: 'ext:requestDetailedRenderReason'; nodeId: string }
   | { type: 'ext:requestTimeline'; nodeId: string }
   | { type: 'ext:startConsoleCapture' }
-  | { type: 'ext:stopConsoleCapture' };
+  | { type: 'ext:stopConsoleCapture' }
+  | { type: 'ext:startNetworkCapture' }
+  | { type: 'ext:stopNetworkCapture' };
 
 export interface TrackingOptions {
   trackAllRenders?: boolean;
@@ -710,6 +764,7 @@ export interface TrackingOptions {
   trackRouter?: boolean;
   trackContext?: boolean;
   trackTanstackQuery?: boolean;
+  trackNetwork?: boolean;
   batchSize?: number;
   batchDelayMs?: number;
 }

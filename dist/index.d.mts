@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage | RuntimeActionStateMessage | RuntimeOptimisticDiffMessage | RuntimeNextjsContextMessage | RuntimeRscPayloadMessage | RuntimeHydrationEventMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage | RuntimeActionStateMessage | RuntimeOptimisticDiffMessage | RuntimeNextjsContextMessage | RuntimeRscPayloadMessage | RuntimeHydrationEventMessage | RuntimeNetworkRequestMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -555,6 +555,51 @@ interface RuntimeHydrationEventMessage {
     errorMessage?: string;
     timestamp: number;
 }
+/** Metadata for a single intercepted network request. Privacy-first: no bodies, no query params, no auth headers. */
+interface NetworkRequestEntry {
+    /** Incrementing request ID */
+    requestId: string;
+    /** HTTP method (GET, POST, PUT, DELETE, PATCH, etc.) */
+    method: string;
+    /** URL path only — query params stripped for privacy */
+    urlPath: string;
+    /** URL host for endpoint grouping */
+    urlHost: string;
+    /** HTTP status code (0 if pending/aborted) */
+    status: number;
+    /** Request duration in ms (null if still pending) */
+    durationMs: number | null;
+    /** Response size from Content-Length header (null if unavailable) */
+    responseSizeBytes: number | null;
+    /** React component that initiated this request (if attributable) */
+    componentName?: string;
+    /** Ancestor chain of the initiating component (last 3) */
+    ancestorChain?: string[];
+    /** True if fetch was called during React render phase (anti-pattern) */
+    initiatedDuringRender: boolean;
+    /** True if fetch was called inside a useEffect callback */
+    initiatedInEffect: boolean;
+    /** Request lifecycle state */
+    state: 'pending' | 'success' | 'error' | 'aborted';
+    /** Deduplication key: `${method}:${normalizedPath}` for duplicate detection */
+    dedupeKey: string;
+    /** True if another request with same dedupeKey was made within 2s */
+    isDuplicate?: boolean;
+    /** True if this is a Next.js Server Action (POST with Next-Action header) */
+    isServerAction?: boolean;
+    /** True if this is a Next.js RSC prefetch (Next-Router-Prefetch header) */
+    isPrefetch?: boolean;
+    /** Error message if request failed */
+    errorMessage?: string;
+    /** Timestamp (Date.now()) */
+    timestamp: number;
+}
+/** Batched network request message sent to FloTrace server */
+interface RuntimeNetworkRequestMessage {
+    type: 'runtime:networkRequest';
+    requests: NetworkRequestEntry[];
+    timestamp: number;
+}
 /**
  * Messages received from extension
  */
@@ -593,6 +638,10 @@ type ExtensionToRuntimeMessage = {
     type: 'ext:startConsoleCapture';
 } | {
     type: 'ext:stopConsoleCapture';
+} | {
+    type: 'ext:startNetworkCapture';
+} | {
+    type: 'ext:stopNetworkCapture';
 };
 interface TrackingOptions {
     trackAllRenders?: boolean;
@@ -603,6 +652,7 @@ interface TrackingOptions {
     trackRouter?: boolean;
     trackContext?: boolean;
     trackTanstackQuery?: boolean;
+    trackNetwork?: boolean;
     batchSize?: number;
     batchDelayMs?: number;
 }
@@ -1298,6 +1348,26 @@ declare function installConsoleTracker(wsClient: FloTraceWebSocketClient): void;
 declare function uninstallConsoleTracker(): void;
 
 /**
+ * Network Request Tracker for @flotrace/runtime
+ *
+ * Patches globalThis.fetch and XMLHttpRequest to capture all network requests
+ * with React component attribution. Designed to chain properly with the existing
+ * RSC payload interceptor (which patches fetch first for Next.js RSC requests).
+ *
+ * Key design decisions:
+ * - Metadata only: URL path, method, status, timing, size (no bodies, no query params, no auth)
+ * - Chains with existing fetch patches (RSC interceptor) — stores current globalThis.fetch, not native
+ * - Component attribution via getCurrentRenderingFiber() + effect context (React 18 + 19)
+ * - Duplicate detection via sliding 2-second window keyed by method:path
+ * - Noise filtering: analytics, HMR, extensions, static assets, FloTrace's own WS
+ * - Batched sending: 500ms flush, max 50 entries per batch, 300 entry ring buffer
+ * - AbortController support: detects aborted requests
+ */
+
+declare function installNetworkTracker(wsClient: FloTraceWebSocketClient): void;
+declare function uninstallNetworkTracker(): void;
+
+/**
  * Serialize a value for safe transmission over WebSocket.
  * Handles circular references, functions, symbols, and large values.
  */
@@ -1307,4 +1377,4 @@ declare function serializeValue(value: unknown, depth?: number, seen?: WeakSet<o
  */
 declare function serializeProps(props: Record<string, unknown>): Record<string, SerializedValue>;
 
-export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type PropChange, type ReduxStoreApi, type SerializedValue, type TanStackMutationInfo, type TanStackQueryClientApi, type TanStackQueryInfo, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installReduxTracker, installRouterTracker, installTanStackQueryTracker, installTimelineTracker, installZustandTracker, isReduxStore, isTanStackQueryClient, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallReduxTracker, uninstallRouterTracker, uninstallTanStackQueryTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };
+export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type NetworkRequestEntry, type PropChange, type ReduxStoreApi, type SerializedValue, type TanStackMutationInfo, type TanStackQueryClientApi, type TanStackQueryInfo, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installNetworkTracker, installReduxTracker, installRouterTracker, installTanStackQueryTracker, installTimelineTracker, installZustandTracker, isReduxStore, isTanStackQueryClient, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallNetworkTracker, uninstallReduxTracker, uninstallRouterTracker, uninstallTanStackQueryTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };
