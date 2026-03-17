@@ -9,7 +9,7 @@
  * - Metadata only: URL path, method, status, timing, size (no bodies, no query params, no auth)
  * - Chains with existing fetch patches (RSC interceptor) — stores current globalThis.fetch, not native
  * - Component attribution via getCurrentRenderingFiber() + effect context (React 18 + 19)
- * - Duplicate detection via sliding 2-second window keyed by method:path
+ * - Duplicate detection via sliding 5-second window keyed by method:path
  * - Noise filtering: analytics, HMR, extensions, static assets, FloTrace's own WS
  * - Batched sending: 500ms flush, max 50 entries per batch, 300 entry ring buffer
  * - AbortController support: detects aborted requests
