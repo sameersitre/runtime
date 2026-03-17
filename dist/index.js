@@ -2350,8 +2350,12 @@ function parseUrl(url) {
     return { path: url.split("?")[0] ?? url, host: "" };
   }
 }
+var COMBINED_NOISE_PATTERN = new RegExp(
+  NOISE_URL_PATTERNS.map((r) => r.source).join("|"),
+  "i"
+);
 function isNoiseUrl(url) {
-  return NOISE_URL_PATTERNS.some((p) => p.test(url));
+  return COMBINED_NOISE_PATTERN.test(url);
 }
 function parseIntOrNull(value) {
   if (!value) return null;
@@ -3451,11 +3455,14 @@ function serializeStoreState(state, logPrefix) {
 function buildCorrelatedRequests(state, changedKeys) {
   const byRequestId = /* @__PURE__ */ new Map();
   for (const key of changedKeys) {
-    const rid = findFetchOrigin(state[key]);
-    if (rid) {
-      const keys = byRequestId.get(rid) ?? [];
-      keys.push(key);
-      byRequestId.set(rid, keys);
+    try {
+      const rid = findFetchOrigin(state[key]);
+      if (rid) {
+        const keys = byRequestId.get(rid) ?? [];
+        keys.push(key);
+        byRequestId.set(rid, keys);
+      }
+    } catch {
     }
   }
   if (byRequestId.size === 0) return void 0;

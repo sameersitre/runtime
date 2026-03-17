@@ -39,11 +39,15 @@ export function buildCorrelatedRequests(
 ): Array<{ requestId: string; storeKeys: string[] }> | undefined {
   const byRequestId = new Map<string, string[]>();
   for (const key of changedKeys) {
-    const rid = findFetchOrigin(state[key]);
-    if (rid) {
-      const keys = byRequestId.get(rid) ?? [];
-      keys.push(key);
-      byRequestId.set(rid, keys);
+    try {
+      const rid = findFetchOrigin(state[key]);
+      if (rid) {
+        const keys = byRequestId.get(rid) ?? [];
+        keys.push(key);
+        byRequestId.set(rid, keys);
+      }
+    } catch {
+      // Best-effort: state[key] may be a Proxy or have getter side effects
     }
   }
   if (byRequestId.size === 0) return undefined;

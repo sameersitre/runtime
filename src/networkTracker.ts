@@ -101,6 +101,12 @@ const responseToRequestId = new WeakMap<Response, string>();
  * Set in our early 'load' listener; matched in patchJsonParse() when axios's
  * transformResponse calls JSON.parse(responseText) in a Promise microtask.
  * Text-matching survives the microtask checkpoint that clears stack-based approaches.
+ *
+ * Known limitation: single-slot design — if two XHR responses complete simultaneously,
+ * the second overwrites the first's requestId before JSON.parse is called, causing
+ * incorrect or missed causal correlations for concurrent XHR requests. This is a
+ * best-effort trade-off; a Map<responseText, requestId> approach would risk holding
+ * large response strings as keys.
  */
 let activeXhrRequestId: string | null = null;
 /** The exact responseText string — matched to avoid false positives. */
@@ -604,8 +610,14 @@ function parseUrl(url: string): { path: string; host: string } {
   }
 }
 
+/** Pre-combined regex for O(1) noise URL matching instead of iterating 25 patterns */
+const COMBINED_NOISE_PATTERN = new RegExp(
+  NOISE_URL_PATTERNS.map(r => r.source).join('|'),
+  'i',
+);
+
 function isNoiseUrl(url: string): boolean {
-  return NOISE_URL_PATTERNS.some((p) => p.test(url));
+  return COMBINED_NOISE_PATTERN.test(url);
 }
 
 /** Parse a content-length string to a number, returning null if absent or invalid. */
