@@ -4306,6 +4306,72 @@ function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClie
               console.error("[FloTrace] Error stopping Network tracker:", error);
             }
             break;
+          // --- Individual tracker start/stop (sidebar panel show/hide) ---
+          case "ext:startReduxTracking":
+            if (reduxStoreRef.current) {
+              try {
+                installReduxTracker(reduxStoreRef.current, client5);
+              } catch (error) {
+                console.error("[FloTrace] Failed to install Redux tracker:", error);
+              }
+            }
+            break;
+          case "ext:stopReduxTracking":
+            try {
+              uninstallReduxTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error stopping Redux tracker:", e);
+            }
+            break;
+          case "ext:startRouterTracking":
+            try {
+              installRouterTracker(client5);
+            } catch (error) {
+              console.error("[FloTrace] Failed to install Router tracker:", error);
+            }
+            break;
+          case "ext:stopRouterTracking":
+            try {
+              uninstallRouterTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error stopping Router tracker:", e);
+            }
+            break;
+          case "ext:startZustandTracking":
+            if (storesRef.current && Object.keys(storesRef.current).length > 0) {
+              try {
+                installZustandTracker(
+                  storesRef.current,
+                  client5
+                );
+              } catch (error) {
+                console.error("[FloTrace] Failed to install Zustand tracker:", error);
+              }
+            }
+            break;
+          case "ext:stopZustandTracking":
+            try {
+              uninstallZustandTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error stopping Zustand tracker:", e);
+            }
+            break;
+          case "ext:startTanstackTracking":
+            if (queryClientRef.current) {
+              try {
+                installTanStackQueryTracker(queryClientRef.current, client5);
+              } catch (error) {
+                console.error("[FloTrace] Failed to install TanStack Query tracker:", error);
+              }
+            }
+            break;
+          case "ext:stopTanstackTracking":
+            try {
+              uninstallTanStackQueryTracker();
+            } catch (e) {
+              console.error("[FloTrace] Error stopping TanStack Query tracker:", e);
+            }
+            break;
           case "ext:requestState":
             break;
         }

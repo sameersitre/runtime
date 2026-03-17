@@ -771,7 +771,16 @@ export type ExtensionToRuntimeMessage =
   | { type: 'ext:startConsoleCapture' }
   | { type: 'ext:stopConsoleCapture' }
   | { type: 'ext:startNetworkCapture' }
-  | { type: 'ext:stopNetworkCapture' };
+  | { type: 'ext:stopNetworkCapture' }
+  // Individual tracker start/stop for sidebar panel hide/show
+  | { type: 'ext:startReduxTracking' }
+  | { type: 'ext:stopReduxTracking' }
+  | { type: 'ext:startRouterTracking' }
+  | { type: 'ext:stopRouterTracking' }
+  | { type: 'ext:startZustandTracking' }
+  | { type: 'ext:stopZustandTracking' }
+  | { type: 'ext:startTanstackTracking' }
+  | { type: 'ext:stopTanstackTracking' };
 
 export interface TrackingOptions {
   trackAllRenders?: boolean;

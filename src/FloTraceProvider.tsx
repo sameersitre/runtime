@@ -347,6 +347,77 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           }
           break;
 
+        // --- Individual tracker start/stop (sidebar panel show/hide) ---
+
+        case 'ext:startReduxTracking':
+          if (reduxStoreRef.current) {
+            try {
+              installReduxTracker(reduxStoreRef.current, client);
+            } catch (error) {
+              console.error('[FloTrace] Failed to install Redux tracker:', error);
+            }
+          }
+          break;
+        case 'ext:stopReduxTracking':
+          try {
+            uninstallReduxTracker();
+          } catch (error) {
+            console.error('[FloTrace] Error stopping Redux tracker:', error);
+          }
+          break;
+
+        case 'ext:startRouterTracking':
+          try {
+            installRouterTracker(client);
+          } catch (error) {
+            console.error('[FloTrace] Failed to install Router tracker:', error);
+          }
+          break;
+        case 'ext:stopRouterTracking':
+          try {
+            uninstallRouterTracker();
+          } catch (error) {
+            console.error('[FloTrace] Error stopping Router tracker:', error);
+          }
+          break;
+
+        case 'ext:startZustandTracking':
+          if (storesRef.current && Object.keys(storesRef.current).length > 0) {
+            try {
+              installZustandTracker(
+                storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>,
+                client,
+              );
+            } catch (error) {
+              console.error('[FloTrace] Failed to install Zustand tracker:', error);
+            }
+          }
+          break;
+        case 'ext:stopZustandTracking':
+          try {
+            uninstallZustandTracker();
+          } catch (error) {
+            console.error('[FloTrace] Error stopping Zustand tracker:', error);
+          }
+          break;
+
+        case 'ext:startTanstackTracking':
+          if (queryClientRef.current) {
+            try {
+              installTanStackQueryTracker(queryClientRef.current, client);
+            } catch (error) {
+              console.error('[FloTrace] Failed to install TanStack Query tracker:', error);
+            }
+          }
+          break;
+        case 'ext:stopTanstackTracking':
+          try {
+            uninstallTanStackQueryTracker();
+          } catch (error) {
+            console.error('[FloTrace] Error stopping TanStack Query tracker:', error);
+          }
+          break;
+
         case 'ext:requestState':
           // Legacy — kept for backward compatibility
           break;

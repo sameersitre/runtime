@@ -664,6 +664,22 @@ type ExtensionToRuntimeMessage = {
     type: 'ext:startNetworkCapture';
 } | {
     type: 'ext:stopNetworkCapture';
+} | {
+    type: 'ext:startReduxTracking';
+} | {
+    type: 'ext:stopReduxTracking';
+} | {
+    type: 'ext:startRouterTracking';
+} | {
+    type: 'ext:stopRouterTracking';
+} | {
+    type: 'ext:startZustandTracking';
+} | {
+    type: 'ext:stopZustandTracking';
+} | {
+    type: 'ext:startTanstackTracking';
+} | {
+    type: 'ext:stopTanstackTracking';
 };
 interface TrackingOptions {
     trackAllRenders?: boolean;
