@@ -50,7 +50,8 @@ export type RuntimeMessage =
   | RuntimeNextjsContextMessage
   | RuntimeRscPayloadMessage
   | RuntimeHydrationEventMessage
-  | RuntimeNetworkRequestMessage;
+  | RuntimeNetworkRequestMessage
+  | RuntimeLocalStateCorrelationMessage;
 
 export interface RuntimeReadyMessage {
   type: 'runtime:ready';
@@ -93,6 +94,9 @@ export interface RuntimeZustandUpdateMessage {
   storeName: string;
   state: Record<string, SerializedValue>;
   changedKeys: string[];
+  /** Per-request causal correlation: each entry maps a requestId to the specific store keys
+   *  whose values came from that fetch response (WeakMap causal correlation). */
+  correlatedRequests?: Array<{ requestId: string; storeKeys: string[] }>;
   timestamp: number;
 }
 
@@ -102,6 +106,9 @@ export interface RuntimeReduxUpdateMessage {
   state: Record<string, SerializedValue>;
   /** Keys that changed */
   changedKeys: string[];
+  /** Per-request causal correlation: each entry maps a requestId to the specific store keys
+   *  whose values came from that fetch response (WeakMap causal correlation). */
+  correlatedRequests?: Array<{ requestId: string; storeKeys: string[] }>;
   timestamp: number;
 }
 
@@ -440,6 +447,8 @@ export interface TanStackQueryInfo {
   totalFetchCount?: number;
   /** Per-query state transition history (ring buffer, max 50) */
   events?: TanStackQueryEvent[];
+  /** requestId of the API call whose response was stored in this query's cache (WeakMap causal) */
+  correlatedRequestId?: string;
 }
 
 /** A state transition event for a TanStack Query */
@@ -731,6 +740,15 @@ export interface NetworkRequestEntry {
 export interface RuntimeNetworkRequestMessage {
   type: 'runtime:networkRequest';
   requests: NetworkRequestEntry[];
+  timestamp: number;
+}
+
+/** Emitted when a fiber's useState/useReducer hook holds API response data (WeakMap causal) */
+export interface RuntimeLocalStateCorrelationMessage {
+  type: 'runtime:localStateCorrelation';
+  requestId: string;
+  componentName: string;
+  hookIndex: number;
   timestamp: number;
 }
 

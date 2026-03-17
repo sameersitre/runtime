@@ -10,7 +10,7 @@ import { installTanStackQueryTracker, uninstallTanStackQueryTracker, type TanSta
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 import { installTimelineTracker, uninstallTimelineTracker, getTimeline } from './timelineTracker';
 import { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
-import { installNetworkTracker, uninstallNetworkTracker } from './networkTracker';
+import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
 
 // Module-level timer for deferred cleanup (React Strict Mode handling).
 // When Strict Mode unmounts then remounts, we cancel this timer so the
@@ -134,6 +134,13 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     // Without this, Suspense resolution commits can be missed if they happen
     // before the server responds, causing skeletons to persist.
     installFiberTreeWalker();
+
+    // Prewarm network tracker EAGERLY — mirrors fiberTreeWalker pattern.
+    // Patches fetch/XHR immediately so page-load requests (e.g. initial
+    // TanStack Query fetches that fire on mount) are captured into earlyBuffer
+    // before the WebSocket connects. When installNetworkTracker(client) is
+    // called later, earlyBuffer is prepended so nothing is lost.
+    prewarmNetworkTracker();
 
     // Handle connection state changes
     const unsubConnection = client.onConnectionChange((isConnected) => {

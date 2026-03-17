@@ -14,7 +14,7 @@
  */
 
 import { getChangedKeys } from './serializer';
-import { serializeStoreState } from './storeUtils';
+import { serializeStoreState, buildCorrelatedRequests } from './storeUtils';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
 /** Minimal Redux store interface — only what we need to subscribe */
@@ -149,6 +149,7 @@ function sendReduxUpdate(
       type: 'runtime:redux',
       state: serializeStoreState(state, 'Redux'),
       changedKeys,
+      correlatedRequests: buildCorrelatedRequests(state, changedKeys),
       timestamp: Date.now(),
     });
   } catch (error) {

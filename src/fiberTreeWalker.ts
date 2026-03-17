@@ -25,6 +25,7 @@ import { detectCompilerStatus } from "./compilerAnalyzer";
 import { detectServerComponent, maybeEmitNextjsContext, resetNextjsDetection } from "./nextjsDetector";
 import { scanActionStateChanges, clearActionStateCache } from "./actionStateTracker";
 import { installRscPayloadInterceptor, uninstallRscPayloadInterceptor } from "./rscPayloadInterceptor";
+import { findFetchOrigin, hasActiveTags } from "./networkTracker";
 export type { SerializedValue };
 
 // React fiber tag constants (from React source: ReactWorkTags.js)
@@ -315,6 +316,9 @@ let cachedFiberRoot: FiberRoot | null = null;
 
 // Track whether we're currently walking (to avoid recursive/concurrent walks)
 let isWalking = false;
+
+// Accumulated useState/useReducer → API correlations during walkFiber, flushed after tree is built
+let pendingLocalStateCorrelations: Array<{ requestId: string; componentName: string; hookIndex: number }> = [];
 
 // Store the original hook so we can restore it
 let originalOnCommitFiberRoot: DevToolsHook["onCommitFiberRoot"] | null = null;
@@ -624,6 +628,46 @@ function detectRenderReason(
 }
 
 /**
+ * Scan a user component's hook linked list for useState/useReducer values that
+ * match a tagged API response in the WeakMap. Only called when hasActiveTags()
+ * is true (zero-cost when no fetch is in-flight). Results accumulate in
+ * pendingLocalStateCorrelations and are emitted after the tree walk.
+ */
+function scanFiberStateForOrigin(fiber: Fiber, componentName: string): void {
+  let hook: FiberHookState | null = fiber.memoizedState;
+  let hookIndex = 0;
+  while (hook !== null) {
+    try {
+      const ms = hook.memoizedState;
+      // Only scan object values — primitives can't be WeakMap keys
+      if (ms !== null && typeof ms === 'object') {
+        // Skip effect hooks: {tag, create, deps} shape
+        const isEffect =
+          'tag' in (ms as Record<string, unknown>) &&
+          'create' in (ms as Record<string, unknown>);
+        if (!isEffect) {
+          const rid = findFetchOrigin(ms);
+          if (rid) {
+            pendingLocalStateCorrelations.push({ requestId: rid, componentName, hookIndex });
+          } else if (hook.queue !== null) {
+            // Also check useReducer's lastRenderedState
+            const lastRendered = (hook.queue as { lastRenderedState: unknown }).lastRenderedState;
+            if (lastRendered !== null && typeof lastRendered === 'object') {
+              const rid2 = findFetchOrigin(lastRendered);
+              if (rid2) {
+                pendingLocalStateCorrelations.push({ requestId: rid2, componentName, hookIndex });
+              }
+            }
+          }
+        }
+      }
+    } catch { /* never break the tree walk */ }
+    hook = hook.next;
+    hookIndex++;
+  }
+}
+
+/**
  * Walk the fiber tree starting from a fiber node.
  * Skips host elements and transparent wrappers, keeps user components.
  *
@@ -726,6 +770,11 @@ function walkFiber(
           isLibrary: libraryName !== undefined ? true : undefined,
           libraryName,
         });
+
+        // Scan hook state for API response correlation (zero-cost when no fetch is in-flight)
+        if (hasActiveTags() && current.memoizedState !== null) {
+          scanFiberStateForOrigin(current, name);
+        }
       } else if (tag === FIBER_TAGS.HostText) {
         // Text nodes have no children to traverse - skip entirely
       } else if (tag === FIBER_TAGS.SuspenseComponent) {
@@ -1077,6 +1126,23 @@ function executeSnapshot(root: FiberRoot): void {
     }
 
     previousFlatTree = currentFlatTree;
+    // Flush any useState/useReducer API correlations detected during this walk
+    if (pendingLocalStateCorrelations.length > 0) {
+      const now = Date.now();
+      const toSend = pendingLocalStateCorrelations.splice(0);
+      for (const corr of toSend) {
+        try {
+          client.sendImmediate({
+            type: 'runtime:localStateCorrelation',
+            requestId: corr.requestId,
+            componentName: corr.componentName,
+            hookIndex: corr.hookIndex,
+            timestamp: now,
+          });
+        } catch { /* best-effort */ }
+      }
+    }
+
     // Schedule prop drilling analysis — debounced to 2s, runs in background after each snapshot
     schedulePropDrillingAnalysis(tree, fiberRefMap, client);
     // Scan for useActionState / useOptimistic changes — best-effort, non-blocking

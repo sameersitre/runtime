@@ -15,7 +15,7 @@
  */
 
 import { getChangedKeys } from './serializer';
-import { serializeStoreState } from './storeUtils';
+import { serializeStoreState, buildCorrelatedRequests } from './storeUtils';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
 /** Minimal Zustand store interface — only what we need to subscribe */
@@ -157,6 +157,7 @@ function sendStoreUpdate(
       storeName,
       state: serializeStoreState(state, `Zustand "${storeName}"`),
       changedKeys,
+      correlatedRequests: buildCorrelatedRequests(state, changedKeys),
       timestamp: Date.now(),
     });
   } catch (error) {

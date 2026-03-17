@@ -1,10 +1,11 @@
 /**
  * Shared utilities for state store trackers (Zustand, Redux).
- * Handles per-key serialization with individual error isolation.
+ * Handles per-key serialization and API → store causal correlation.
  */
 
 import type { SerializedValue } from './types';
 import { serializeValue } from './serializer';
+import { findFetchOrigin } from './networkTracker';
 
 /**
  * Serialize a record of state values individually.
@@ -24,4 +25,27 @@ export function serializeStoreState(
     }
   }
   return serialized;
+}
+
+/**
+ * Build a `correlatedRequests` array by scanning each changed state key for a
+ * WeakMap-tagged API response origin. Groups multiple keys by their requestId.
+ * Returns undefined (not an empty array) when no correlations found, so callers
+ * can omit the field from the message entirely.
+ */
+export function buildCorrelatedRequests(
+  state: Record<string, unknown>,
+  changedKeys: string[],
+): Array<{ requestId: string; storeKeys: string[] }> | undefined {
+  const byRequestId = new Map<string, string[]>();
+  for (const key of changedKeys) {
+    const rid = findFetchOrigin(state[key]);
+    if (rid) {
+      const keys = byRequestId.get(rid) ?? [];
+      keys.push(key);
+      byRequestId.set(rid, keys);
+    }
+  }
+  if (byRequestId.size === 0) return undefined;
+  return Array.from(byRequestId, ([requestId, storeKeys]) => ({ requestId, storeKeys }));
 }

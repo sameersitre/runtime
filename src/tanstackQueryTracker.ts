@@ -16,6 +16,7 @@
 import type { SerializedValue, TanStackQueryInfo, TanStackMutationInfo, TanStackQueryEvent, MutationCorrelation } from './types';
 import { serializeValue } from './serializer';
 import type { FloTraceWebSocketClient } from './websocketClient';
+import { findFetchOrigin } from './networkTracker';
 
 // ============================================================================
 // Duck-Typed Interfaces (no TanStack dependency)
@@ -120,6 +121,8 @@ interface QueryTrackingState {
   wastedRefetchCount: number;
   /** State transition ring buffer */
   events: TanStackQueryEvent[];
+  /** requestId of the API call whose response landed in this query's cache (one-shot, cleared after send) */
+  pendingCorrelationId?: string;
 }
 
 /** Per-query tracking state keyed by queryHash */
@@ -350,6 +353,12 @@ function updateQueryTracking(query: DuckQuery, eventType: string): void {
       // Update data hash after fetch completes
       tracking.lastDataHash = currentDataHash;
       tracking.lastDataUpdatedAt = query.state.dataUpdatedAt;
+
+      // Causal API→TanStack correlation via WeakMap tag
+      if (query.state.data !== null && query.state.data !== undefined) {
+        const rid = findFetchOrigin(query.state.data);
+        if (rid) tracking.pendingCorrelationId = rid;
+      }
     }
 
     // Correlation: query started fetching → check pending correlation windows
@@ -544,6 +553,12 @@ function serializeQuery(query: DuckQuery): TanStackQueryInfo {
   const errorMessage = query.state.error ? extractErrorMessage(query.state.error) : undefined;
   const tracking = queryTracking.get(query.queryHash);
 
+  // One-shot: include pending correlation ID then clear it so it's only sent once
+  const correlatedRequestId = tracking?.pendingCorrelationId;
+  if (correlatedRequestId && tracking) {
+    tracking.pendingCorrelationId = undefined;
+  }
+
   return {
     queryKey: queryKeySerialized,
     queryHash: query.queryHash,
@@ -574,6 +589,7 @@ function serializeQuery(query: DuckQuery): TanStackQueryInfo {
     totalFetchCount: tracking?.totalFetchCount,
     // Phase 3: query timeline
     events: tracking?.events.length ? [...tracking.events] : undefined,
+    correlatedRequestId,
   };
 }
 
