@@ -1,6 +1,6 @@
 # @flotrace/runtime
 
-Runtime package for [FloTrace](https://marketplace.visualstudio.com/items?itemName=flotrace.flotrace) — enables real-time React component tree visualization, render tracking, and state management monitoring directly in VS Code.
+Runtime package for FloTrace — enables real-time React component tree visualization, render tracking, state management monitoring, and network health analysis in the FloTrace desktop app.
 
 ## Installation
 
@@ -30,7 +30,7 @@ createRoot(document.getElementById('root')!).render(
 );
 ```
 
-Then open the FloTrace panel in VS Code — your component tree will appear automatically.
+Then launch the FloTrace desktop app — your component tree will appear automatically.
 
 ## Configuration
 
@@ -53,6 +53,7 @@ All config options are optional. Pass them via the `config` prop:
 | `trackRedux` | `boolean` | `true` | Enable Redux state tracking |
 | `trackRouter` | `boolean` | `true` | Enable URL navigation tracking |
 | `trackContext` | `boolean` | `true` | Enable React Context tracking |
+| `trackTanstackQuery` | `boolean` | `true` | Enable TanStack Query tracking |
 
 ## Framework Setup
 
@@ -167,17 +168,39 @@ import { store } from './store';
 </FloTraceProvider>
 ```
 
-### Combined (Zustand + Redux + Router)
+### TanStack Query
+
+Pass your TanStack Query client via the `queryClient` prop:
+
+```tsx
+import { FloTraceProvider } from '@flotrace/runtime';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+const queryClient = new QueryClient();
+
+<QueryClientProvider client={queryClient}>
+  <FloTraceProvider
+    queryClient={queryClient}
+    config={{ appName: 'My App' }}
+  >
+    <App />
+  </FloTraceProvider>
+</QueryClientProvider>
+```
+
+### Combined (Zustand + Redux + TanStack Query + Router)
 
 ```tsx
 import { FloTraceProvider } from '@flotrace/runtime';
 import { store } from './reduxStore';
 import { useBearStore } from './zustandStore';
+import { queryClient } from './queryClient';
 
 <FloTraceProvider
   config={{ appName: 'My App' }}
   stores={{ bearStore: useBearStore }}
   reduxStore={store}
+  queryClient={queryClient}
 >
   <App />
 </FloTraceProvider>
@@ -236,9 +259,9 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 
 ## Troubleshooting
 
-### "Not connected" in VS Code
+### "Not connected"
 
-1. Ensure the FloTrace extension is running in VS Code
+1. Ensure the FloTrace desktop app is running
 2. Check the port matches (default: 3457)
 3. Verify `config.enabled` is `true`
 4. Check browser console for `[FloTrace]` logs
@@ -252,14 +275,14 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 ### Component tree is missing or incomplete
 
 - The fiber tree walker needs React DevTools hook or DOM-based fiber access
-- React DevTools extension (or standalone) improves reliability
+- React DevTools browser extension improves reliability
 - Tree depth is capped at 100 levels, children at 300 per node
 - Reload the page if the tree appears empty
 
 ### WebSocket keeps reconnecting
 
 - FloTrace uses exponential backoff (2s → 4s → 8s... up to 30s) with a 10-attempt budget
-- After 10 failed attempts, reload the page or restart the extension to retry
+- After 10 failed attempts, reload the page or restart FloTrace to retry
 - Check that no firewall or proxy is blocking `ws://localhost:3457`
 
 ## API Reference
@@ -287,8 +310,17 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 | `SerializedValue` | Serialized value type for safe WebSocket transmission |
 | `LiveTreeNode` | Node in the live component tree |
 | `ReduxStoreApi` | Minimal Redux store interface |
+| `TanStackQueryClientApi` | Duck-typed TanStack Query client interface |
 | `TrackingOptions` | Tracking options from extension |
 | `DEFAULT_CONFIG` | Default configuration values |
+| `DetailedRenderReason` | Detailed render reason with prop/state/context diffs |
+| `HookType`, `HookInfo` | Hook type classification and inspection data |
+| `EffectInfo` | Effect info with willRun and dep diffs |
+| `TimelineEvent`, `TimelineEventType` | Component lifecycle events |
+| `ConsoleCaptureEntry`, `ConsoleLevel` | Console capture with component attribution |
+| `TanStackQueryInfo`, `TanStackMutationInfo` | Query and mutation tracking data |
+| `NetworkRequestEntry` | Network request metadata (method, status, timing, correlation) |
+| `Fiber`, `FiberHookState`, `FiberEffect` | React fiber type definitions |
 
 ### Advanced Exports
 
@@ -296,11 +328,30 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 |--------|-------------|
 | `getWebSocketClient(config?)` | Get singleton WebSocket client |
 | `disposeWebSocketClient()` | Dispose the WebSocket client |
+| `FloTraceWebSocketClient` | WebSocket client class |
 | `installFiberTreeWalker()` | Manually install fiber tree walker |
 | `uninstallFiberTreeWalker()` | Uninstall fiber tree walker |
 | `requestTreeSnapshot()` | Request a tree snapshot (DOM fallback) |
+| `getNodeHooks(nodeId)` | Inspect hooks for a specific component |
+| `getNodeEffects(nodeId)` | Inspect effects for a specific component |
+| `getDetailedRenderReason(nodeId)` | Get detailed render reason (prop/state/context diffs) |
+| `getFiberRefMap()` | Get map of all tracked fiber refs |
+| `inspectHooks(fiber)` | Classify and inspect hooks from fiber |
+| `inspectEffects(fiber)` | Inspect effects from fiber updateQueue |
+| `installZustandTracker()` / `uninstall...` | Zustand per-store subscription tracking |
+| `installReduxTracker()` / `uninstall...` | Redux store subscription tracking |
+| `installRouterTracker()` / `uninstall...` | History API patching for route tracking |
+| `installTanStackQueryTracker()` / `uninstall...` | TanStack Query cache subscriber (duck-typed) |
+| `installNetworkTracker()` / `uninstall...` | Fetch/XHR patching for network monitoring |
+| `prewarmNetworkTracker()` | Pre-install patches to capture page-load requests |
+| `installConsoleTracker()` / `uninstall...` | Console monkey-patching with fiber attribution |
+| `installTimelineTracker()` / `uninstall...` | Component lifecycle event tracking |
+| `recordTimelineEvent()` | Manually record a timeline event |
+| `getTimeline(componentId)` | Get timeline events for a component |
 | `serializeValue(value)` | Serialize a value for WebSocket |
 | `serializeProps(props)` | Serialize props object |
+| `isReduxStore(obj)` | Type guard for Redux store |
+| `isTanStackQueryClient(obj)` | Type guard for TanStack Query client |
 
 ## License
 
