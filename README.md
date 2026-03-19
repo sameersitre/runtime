@@ -317,7 +317,6 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 | `HookType`, `HookInfo` | Hook type classification and inspection data |
 | `EffectInfo` | Effect info with willRun and dep diffs |
 | `TimelineEvent`, `TimelineEventType` | Component lifecycle events |
-| `ConsoleCaptureEntry`, `ConsoleLevel` | Console capture with component attribution |
 | `TanStackQueryInfo`, `TanStackMutationInfo` | Query and mutation tracking data |
 | `NetworkRequestEntry` | Network request metadata (method, status, timing, correlation) |
 | `Fiber`, `FiberHookState`, `FiberEffect` | React fiber type definitions |
@@ -344,7 +343,6 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 | `installTanStackQueryTracker()` / `uninstall...` | TanStack Query cache subscriber (duck-typed) |
 | `installNetworkTracker()` / `uninstall...` | Fetch/XHR patching for network monitoring |
 | `prewarmNetworkTracker()` | Pre-install patches to capture page-load requests |
-| `installConsoleTracker()` / `uninstall...` | Console monkey-patching with fiber attribution |
 | `installTimelineTracker()` / `uninstall...` | Component lifecycle event tracking |
 | `recordTimelineEvent()` | Manually record a timeline event |
 | `getTimeline(componentId)` | Get timeline events for a component |

@@ -28,7 +28,6 @@ export type {
   DetailedRenderReason, DetailedRenderReasonType, PropChange,
   HookType, HookInfo, EffectInfo,
   TimelineEventType, TimelineEvent,
-  ConsoleLevel, ConsoleCaptureEntry,
   TanStackQueryInfo, TanStackMutationInfo,
 } from './types';
 
@@ -58,9 +57,6 @@ export { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 
 // Timeline tracker for component lifecycle events
 export { installTimelineTracker, uninstallTimelineTracker, recordTimelineEvent, getTimeline } from './timelineTracker';
-
-// Console capture tracker
-export { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
 
 // Network request tracker
 export { installNetworkTracker, uninstallNetworkTracker } from './networkTracker';

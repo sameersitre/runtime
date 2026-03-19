@@ -9,7 +9,6 @@ import { installReduxTracker, uninstallReduxTracker, type ReduxStoreApi } from '
 import { installTanStackQueryTracker, uninstallTanStackQueryTracker, type TanStackQueryClientApi } from './tanstackQueryTracker';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 import { installTimelineTracker, uninstallTimelineTracker, getTimeline } from './timelineTracker';
-import { installConsoleTracker, uninstallConsoleTracker } from './consoleTracker';
 import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
 
 // Module-level timer for deferred cleanup (React Strict Mode handling).
@@ -216,7 +215,6 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling TanStack Query tracker:', e); }
           try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Router tracker:', e); }
           try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Timeline tracker:', e); }
-          try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Console tracker:', e); }
           try { uninstallNetworkTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Network tracker:', e); }
           console.log('[FloTrace] Tracking stopped');
           break;
@@ -310,24 +308,6 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           }
           break;
         }
-
-        case 'ext:startConsoleCapture':
-          try {
-            installConsoleTracker(client);
-            console.log('[FloTrace] Console capture started');
-          } catch (error) {
-            console.error('[FloTrace] Failed to install Console tracker:', error);
-          }
-          break;
-
-        case 'ext:stopConsoleCapture':
-          try {
-            uninstallConsoleTracker();
-            console.log('[FloTrace] Console capture stopped');
-          } catch (error) {
-            console.error('[FloTrace] Error stopping Console tracker:', error);
-          }
-          break;
 
         case 'ext:startNetworkCapture':
           try {
@@ -446,7 +426,6 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
         try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (tanstackQueryTracker):', e); }
         try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (routerTracker):', e); }
         try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (timelineTracker):', e); }
-        try { uninstallConsoleTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (consoleTracker):', e); }
         try { uninstallNetworkTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (networkTracker):', e); }
         try { disposeWebSocketClient(); } catch (e) { console.error('[FloTrace] Error during cleanup (websocketClient):', e); }
       }, 100);

@@ -28,7 +28,7 @@ type SerializedValue = null | boolean | number | string | SerializedValue[] | {
 /**
  * Messages sent from runtime to extension
  */
-type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeConsoleCaptureMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage | RuntimeActionStateMessage | RuntimeOptimisticDiffMessage | RuntimeNextjsContextMessage | RuntimeRscPayloadMessage | RuntimeHydrationEventMessage | RuntimeNetworkRequestMessage | RuntimeLocalStateCorrelationMessage;
+type RuntimeMessage = RuntimeReadyMessage | RuntimeRenderMessage | RuntimePropsUpdateMessage | RuntimeNodePropsMessage | RuntimeZustandUpdateMessage | RuntimeReduxUpdateMessage | RuntimeRouterUpdateMessage | RuntimeContextUpdateMessage | RuntimeDisconnectMessage | RuntimeTreeSnapshotMessage | RuntimeTreeDiffMessage | RuntimeNodeHooksMessage | RuntimeNodeEffectsMessage | RuntimeDetailedRenderReasonMessage | RuntimeTimelineEventMessage | RuntimeTanStackQueryUpdateMessage | RuntimeRenderTriggerMessage | RuntimeRenderCascadeMessage | RuntimePropDrillingMessage | RuntimeActionStateMessage | RuntimeOptimisticDiffMessage | RuntimeNextjsContextMessage | RuntimeRscPayloadMessage | RuntimeHydrationEventMessage | RuntimeNetworkRequestMessage | RuntimeLocalStateCorrelationMessage;
 interface RuntimeReadyMessage {
     type: 'runtime:ready';
     appName?: string;
@@ -278,27 +278,6 @@ interface TimelineEvent {
     /** Additional context (e.g., which hook, which prop) */
     detail?: SerializedValue;
 }
-/**
- * Console log levels captured by the console tracker.
- */
-type ConsoleLevel = 'log' | 'warn' | 'error' | 'info' | 'debug';
-/**
- * A captured console.log/warn/error/info/debug call with fiber attribution.
- */
-interface ConsoleCaptureEntry {
-    /** Console method that was called */
-    level: ConsoleLevel;
-    /** Serialized arguments passed to console */
-    args: SerializedValue[];
-    /** When the console call occurred */
-    timestamp: number;
-    /** Component name if called during a React render */
-    componentName?: string;
-    /** Ancestor chain: ["App", "Dashboard", "Card"] */
-    ancestorChain?: string[];
-    /** Path-based node ID if attributable */
-    nodeId?: string;
-}
 interface RuntimeNodeHooksMessage {
     type: 'runtime:nodeHooks';
     nodeId: string;
@@ -322,11 +301,6 @@ interface RuntimeTimelineEventMessage {
     nodeId: string;
     componentName: string;
     event: TimelineEvent;
-}
-interface RuntimeConsoleCaptureMessage {
-    type: 'runtime:consoleCapture';
-    entries: ConsoleCaptureEntry[];
-    timestamp: number;
 }
 /** Serialized query info sent over WebSocket */
 interface TanStackQueryInfo {
@@ -656,10 +630,6 @@ type ExtensionToRuntimeMessage = {
 } | {
     type: 'ext:requestTimeline';
     nodeId: string;
-} | {
-    type: 'ext:startConsoleCapture';
-} | {
-    type: 'ext:stopConsoleCapture';
 } | {
     type: 'ext:startNetworkCapture';
 } | {
@@ -1362,30 +1332,6 @@ declare function recordTimelineEvent(nodeId: string, componentName: string, even
 declare function getTimeline(nodeId: string): TimelineEvent[];
 
 /**
- * Console Capture for @flotrace/runtime
- *
- * Monkey-patches console.log/warn/error/info/debug to capture calls
- * with React component attribution. Attempts to identify which component
- * triggered the console call via React's internal current fiber tracking.
- *
- * Key design decisions:
- * - Always calls the original console method first (preserves normal behavior)
- * - Uses a batch buffer (max 50 entries, 500ms flush) to avoid flooding WebSocket
- * - Fiber attribution via React's __SECRET_INTERNALS (works in dev mode)
- * - Skips [FloTrace]-prefixed logs to avoid recursion
- */
-
-/**
- * Install the console tracker.
- * Monkey-patches console methods to capture calls with component attribution.
- */
-declare function installConsoleTracker(wsClient: FloTraceWebSocketClient): void;
-/**
- * Uninstall the console tracker and restore original console methods.
- */
-declare function uninstallConsoleTracker(): void;
-
-/**
  * Network Request Tracker for @flotrace/runtime
  *
  * Patches globalThis.fetch and XMLHttpRequest to capture all network requests
@@ -1415,4 +1361,4 @@ declare function serializeValue(value: unknown, depth?: number, seen?: WeakSet<o
  */
 declare function serializeProps(props: Record<string, unknown>): Record<string, SerializedValue>;
 
-export { type ConsoleCaptureEntry, type ConsoleLevel, DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type NetworkRequestEntry, type PropChange, type ReduxStoreApi, type SerializedValue, type TanStackMutationInfo, type TanStackQueryClientApi, type TanStackQueryInfo, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installConsoleTracker, installFiberTreeWalker, installNetworkTracker, installReduxTracker, installRouterTracker, installTanStackQueryTracker, installTimelineTracker, installZustandTracker, isReduxStore, isTanStackQueryClient, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallConsoleTracker, uninstallFiberTreeWalker, uninstallNetworkTracker, uninstallReduxTracker, uninstallRouterTracker, uninstallTanStackQueryTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };
+export { DEFAULT_CONFIG, type DetailedRenderReason, type DetailedRenderReasonType, type EffectInfo, type Fiber, type FiberEffect, type FiberHookState, type FloTraceConfig, FloTraceProvider, type FloTraceProviderProps, FloTraceWebSocketClient, type HookInfo, type HookType, type LiveTreeNode, type NetworkRequestEntry, type PropChange, type ReduxStoreApi, type SerializedValue, type TanStackMutationInfo, type TanStackQueryClientApi, type TanStackQueryInfo, type TimelineEvent, type TimelineEventType, type TrackingOptions, disposeWebSocketClient, getDetailedRenderReason, getFiberRefMap, getNodeEffects, getNodeHooks, getTimeline, getWebSocketClient, inspectEffects, inspectHooks, installFiberTreeWalker, installNetworkTracker, installReduxTracker, installRouterTracker, installTanStackQueryTracker, installTimelineTracker, installZustandTracker, isReduxStore, isTanStackQueryClient, recordTimelineEvent, requestTreeSnapshot, serializeProps, serializeValue, uninstallFiberTreeWalker, uninstallNetworkTracker, uninstallReduxTracker, uninstallRouterTracker, uninstallTanStackQueryTracker, uninstallTimelineTracker, uninstallZustandTracker, useFloTrace, useTrackProps, withFloTrace };

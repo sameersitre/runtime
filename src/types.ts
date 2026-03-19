@@ -39,7 +39,6 @@ export type RuntimeMessage =
   | RuntimeNodeEffectsMessage
   | RuntimeDetailedRenderReasonMessage
   | RuntimeTimelineEventMessage
-  | RuntimeConsoleCaptureMessage
   | RuntimeTanStackQueryUpdateMessage
   | RuntimeRenderTriggerMessage
   | RuntimeRenderCascadeMessage
@@ -348,29 +347,6 @@ export interface TimelineEvent {
   detail?: SerializedValue;
 }
 
-/**
- * Console log levels captured by the console tracker.
- */
-export type ConsoleLevel = 'log' | 'warn' | 'error' | 'info' | 'debug';
-
-/**
- * A captured console.log/warn/error/info/debug call with fiber attribution.
- */
-export interface ConsoleCaptureEntry {
-  /** Console method that was called */
-  level: ConsoleLevel;
-  /** Serialized arguments passed to console */
-  args: SerializedValue[];
-  /** When the console call occurred */
-  timestamp: number;
-  /** Component name if called during a React render */
-  componentName?: string;
-  /** Ancestor chain: ["App", "Dashboard", "Card"] */
-  ancestorChain?: string[];
-  /** Path-based node ID if attributable */
-  nodeId?: string;
-}
-
 // ============================================================================
 // New Runtime Messages (Console-Free Debugging)
 // ============================================================================
@@ -401,12 +377,6 @@ export interface RuntimeTimelineEventMessage {
   nodeId: string;
   componentName: string;
   event: TimelineEvent;
-}
-
-export interface RuntimeConsoleCaptureMessage {
-  type: 'runtime:consoleCapture';
-  entries: ConsoleCaptureEntry[];
-  timestamp: number;
 }
 
 // ============================================================================
@@ -768,8 +738,6 @@ export type ExtensionToRuntimeMessage =
   | { type: 'ext:requestNodeEffects'; nodeId: string }
   | { type: 'ext:requestDetailedRenderReason'; nodeId: string }
   | { type: 'ext:requestTimeline'; nodeId: string }
-  | { type: 'ext:startConsoleCapture' }
-  | { type: 'ext:stopConsoleCapture' }
   | { type: 'ext:startNetworkCapture' }
   | { type: 'ext:stopNetworkCapture' }
   // Individual tracker start/stop for sidebar panel hide/show

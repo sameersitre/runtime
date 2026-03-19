@@ -17,7 +17,7 @@
 
 import type { NetworkRequestEntry } from './types';
 import type { FloTraceWebSocketClient } from './websocketClient';
-import { getCurrentRenderingFiber, getComponentNameFromFiber, buildAncestorChain } from './consoleTracker';
+import { getCurrentRenderingFiber, getComponentNameFromFiber, buildAncestorChain } from './fiberAttribution';
 
 // ============================================================================
 // Constants

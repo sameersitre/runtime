@@ -13,9 +13,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-// Mock consoleTracker before importing networkTracker to avoid
+// Mock fiberAttribution before importing networkTracker to avoid
 // window.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED dependency
-vi.mock('./consoleTracker', () => ({
+vi.mock('./fiberAttribution', () => ({
   getCurrentRenderingFiber: vi.fn(() => null),
   getComponentNameFromFiber: vi.fn(() => null),
   buildAncestorChain: vi.fn(() => []),
