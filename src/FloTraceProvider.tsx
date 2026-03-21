@@ -16,6 +16,15 @@ import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker }
 // WebSocket connection persists instead of being torn down and recreated.
 let pendingCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Runs a tracker operation, logging errors without throwing so one failure doesn't block others. */
+function safeTrackerOp(name: string, op: () => void): void {
+  try {
+    op();
+  } catch (error) {
+    console.error(`[FloTrace] ${name}:`, error);
+  }
+}
+
 /**
  * Context for FloTrace runtime state
  */
@@ -111,6 +120,19 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
   const queryClientRef = useRef(queryClient);
   queryClientRef.current = queryClient;
 
+  // ── Early patching — runs during render (top-down, before children render) ──
+  // Must happen in render phase, NOT in useEffect/useLayoutEffect, because:
+  // 1. urql with suspense:true calls fetch() during child render (throws promise)
+  // 2. TanStack Query fires fetches in child useEffect (before parent useEffect)
+  // Both happen before any parent effect can patch globalThis.fetch.
+  // These calls are idempotent (module-level isPrewarmed/isInstalled guards) —
+  // safe for React 19 Strict Mode double-render and subsequent re-renders.
+  if (mergedConfig.enabled && typeof window !== 'undefined') {
+    getWebSocketClient(mergedConfig); // ensure singleton created with correct config
+    installFiberTreeWalker();
+    prewarmNetworkTracker();
+  }
+
   useEffect(() => {
     if (!mergedConfig.enabled) {
       return;
@@ -125,21 +147,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
       pendingCleanupTimer = null;
     }
 
-    const client = getWebSocketClient(mergedConfig);
-
-    // Install fiber tree walker EAGERLY — before WebSocket connects.
-    // This hooks onCommitFiberRoot immediately so no React commits are missed
-    // during the window between page load and ext:startTreeTracking arriving.
-    // Without this, Suspense resolution commits can be missed if they happen
-    // before the server responds, causing skeletons to persist.
-    installFiberTreeWalker();
-
-    // Prewarm network tracker EAGERLY — mirrors fiberTreeWalker pattern.
-    // Patches fetch/XHR immediately so page-load requests (e.g. initial
-    // TanStack Query fetches that fire on mount) are captured into earlyBuffer
-    // before the WebSocket connects. When installNetworkTracker(client) is
-    // called later, earlyBuffer is prepended so nothing is lost.
-    prewarmNetworkTracker();
+    const client = getWebSocketClient(); // singleton already created in render phase
 
     // Handle connection state changes
     const unsubConnection = client.onConnectionChange((isConnected) => {
@@ -164,58 +172,35 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           trackingOptionsRef.current = message.options || {};
           // Each tracker installed independently so one failure doesn't block others
           if (message.options?.trackZustand && storesRef.current && Object.keys(storesRef.current).length > 0) {
-            try {
-              installZustandTracker(storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>, client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Zustand tracker:', error);
-            }
+            safeTrackerOp('Zustand install', () =>
+              installZustandTracker(storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>, client));
           }
           if (message.options?.trackRedux && reduxStoreRef.current) {
-            try {
-              installReduxTracker(reduxStoreRef.current, client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Redux tracker:', error);
-            }
+            safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
           }
           if (message.options?.trackTanstackQuery && queryClientRef.current) {
-            try {
-              installTanStackQueryTracker(queryClientRef.current, client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install TanStack Query tracker:', error);
-            }
+            safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
           }
           if (message.options?.trackRouter) {
-            try {
-              installRouterTracker(client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Router tracker:', error);
-            }
+            safeTrackerOp('Router install', () => installRouterTracker(client));
           }
           if (message.options?.trackNetwork) {
-            try {
-              installNetworkTracker(client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Network tracker:', error);
-            }
+            safeTrackerOp('Network install', () => installNetworkTracker(client));
           }
           // Timeline tracker — always install with tracking (captures mount/render events)
-          try {
-            installTimelineTracker(client);
-          } catch (error) {
-            console.error('[FloTrace] Failed to install Timeline tracker:', error);
-          }
+          safeTrackerOp('Timeline install', () => installTimelineTracker(client));
           console.log('[FloTrace] Tracking started with options:', message.options);
           break;
 
         case 'ext:stopTracking':
           trackingOptionsRef.current = {};
           // Per-tracker uninstall so one failure doesn't block others
-          try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Zustand tracker:', e); }
-          try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Redux tracker:', e); }
-          try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling TanStack Query tracker:', e); }
-          try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Router tracker:', e); }
-          try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Timeline tracker:', e); }
-          try { uninstallNetworkTracker(); } catch (e) { console.error('[FloTrace] Error uninstalling Network tracker:', e); }
+          safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
+          safeTrackerOp('Redux uninstall', uninstallReduxTracker);
+          safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
+          safeTrackerOp('Router uninstall', uninstallRouterTracker);
+          safeTrackerOp('Timeline uninstall', uninstallTimelineTracker);
+          safeTrackerOp('Network uninstall', uninstallNetworkTracker);
           console.log('[FloTrace] Tracking stopped');
           break;
 
@@ -310,92 +295,51 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
         }
 
         case 'ext:startNetworkCapture':
-          try {
-            installNetworkTracker(client);
-            console.log('[FloTrace] Network capture started');
-          } catch (error) {
-            console.error('[FloTrace] Failed to install Network tracker:', error);
-          }
+          safeTrackerOp('Network capture start', () => installNetworkTracker(client));
           break;
 
         case 'ext:stopNetworkCapture':
-          try {
-            uninstallNetworkTracker();
-            console.log('[FloTrace] Network capture stopped');
-          } catch (error) {
-            console.error('[FloTrace] Error stopping Network tracker:', error);
-          }
+          safeTrackerOp('Network capture stop', uninstallNetworkTracker);
           break;
 
         // --- Individual tracker start/stop (sidebar panel show/hide) ---
 
         case 'ext:startReduxTracking':
           if (reduxStoreRef.current) {
-            try {
-              installReduxTracker(reduxStoreRef.current, client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Redux tracker:', error);
-            }
+            safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
           }
           break;
         case 'ext:stopReduxTracking':
-          try {
-            uninstallReduxTracker();
-          } catch (error) {
-            console.error('[FloTrace] Error stopping Redux tracker:', error);
-          }
+          safeTrackerOp('Redux uninstall', uninstallReduxTracker);
           break;
 
         case 'ext:startRouterTracking':
-          try {
-            installRouterTracker(client);
-          } catch (error) {
-            console.error('[FloTrace] Failed to install Router tracker:', error);
-          }
+          safeTrackerOp('Router install', () => installRouterTracker(client));
           break;
         case 'ext:stopRouterTracking':
-          try {
-            uninstallRouterTracker();
-          } catch (error) {
-            console.error('[FloTrace] Error stopping Router tracker:', error);
-          }
+          safeTrackerOp('Router uninstall', uninstallRouterTracker);
           break;
 
         case 'ext:startZustandTracking':
           if (storesRef.current && Object.keys(storesRef.current).length > 0) {
-            try {
+            safeTrackerOp('Zustand install', () =>
               installZustandTracker(
                 storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>,
                 client,
-              );
-            } catch (error) {
-              console.error('[FloTrace] Failed to install Zustand tracker:', error);
-            }
+              ));
           }
           break;
         case 'ext:stopZustandTracking':
-          try {
-            uninstallZustandTracker();
-          } catch (error) {
-            console.error('[FloTrace] Error stopping Zustand tracker:', error);
-          }
+          safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
           break;
 
         case 'ext:startTanstackTracking':
           if (queryClientRef.current) {
-            try {
-              installTanStackQueryTracker(queryClientRef.current, client);
-            } catch (error) {
-              console.error('[FloTrace] Failed to install TanStack Query tracker:', error);
-            }
+            safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
           }
           break;
         case 'ext:stopTanstackTracking':
-          try {
-            uninstallTanStackQueryTracker();
-          } catch (error) {
-            console.error('[FloTrace] Error stopping TanStack Query tracker:', error);
-          }
+          safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
           break;
 
         case 'ext:requestState':
@@ -420,14 +364,14 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
       // Each uninstall wrapped independently so one failure doesn't block others
       pendingCleanupTimer = setTimeout(() => {
         pendingCleanupTimer = null;
-        try { uninstallFiberTreeWalker(); } catch (e) { console.error('[FloTrace] Error during cleanup (fiberTreeWalker):', e); }
-        try { uninstallZustandTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (zustandTracker):', e); }
-        try { uninstallReduxTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (reduxTracker):', e); }
-        try { uninstallTanStackQueryTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (tanstackQueryTracker):', e); }
-        try { uninstallRouterTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (routerTracker):', e); }
-        try { uninstallTimelineTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (timelineTracker):', e); }
-        try { uninstallNetworkTracker(); } catch (e) { console.error('[FloTrace] Error during cleanup (networkTracker):', e); }
-        try { disposeWebSocketClient(); } catch (e) { console.error('[FloTrace] Error during cleanup (websocketClient):', e); }
+        safeTrackerOp('cleanup fiberTreeWalker', uninstallFiberTreeWalker);
+        safeTrackerOp('cleanup zustandTracker', uninstallZustandTracker);
+        safeTrackerOp('cleanup reduxTracker', uninstallReduxTracker);
+        safeTrackerOp('cleanup tanstackQueryTracker', uninstallTanStackQueryTracker);
+        safeTrackerOp('cleanup routerTracker', uninstallRouterTracker);
+        safeTrackerOp('cleanup timelineTracker', uninstallTimelineTracker);
+        safeTrackerOp('cleanup networkTracker', uninstallNetworkTracker);
+        safeTrackerOp('cleanup websocketClient', disposeWebSocketClient);
       }, 100);
     };
   }, [mergedConfig.enabled, mergedConfig.port, mergedConfig.appName]);

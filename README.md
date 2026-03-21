@@ -351,6 +351,37 @@ const FloTraceProvider = process.env.NODE_ENV === 'development'
 | `isReduxStore(obj)` | Type guard for Redux store |
 | `isTanStackQueryClient(obj)` | Type guard for TanStack Query client |
 
+## Publishing
+
+### Prerequisites
+
+```bash
+npm login
+```
+
+### Release Scripts
+
+| Script | Version Change | When to Use |
+|--------|---------------|-------------|
+| `npm run release:patch` | `0.1.0` → `0.1.1` | Bug fixes, small tweaks |
+| `npm run release:minor` | `0.1.0` → `0.2.0` | New features, non-breaking changes |
+| `npm run release:major` | `0.1.0` → `1.0.0` | Breaking API changes |
+
+Each release script automatically:
+1. Bumps the version in `package.json`
+2. Creates a git commit and tag (e.g. `v0.1.1`)
+3. Cleans `dist/`, rebuilds, and typechecks (`prepublishOnly`)
+4. Publishes to npm under `@flotrace` scope
+
+### From the monorepo root
+
+```bash
+npm run runtime:release:patch   # Bump patch + build + publish
+npm run runtime:release:minor   # Bump minor + build + publish
+npm run runtime:release:major   # Bump major + build + publish
+npm run runtime:publish         # Publish current version (no bump)
+```
+
 ## License
 
 MIT
