@@ -1,10 +1,10 @@
-import React, { useEffect, useRef, createContext, useContext, type ReactNode, Profiler } from 'react';
+import React, { useCallback, useEffect, useRef, createContext, useContext, type ReactNode, Profiler } from 'react';
 import type { FloTraceConfig, TrackingOptions } from './types';
 import { DEFAULT_CONFIG } from './types';
 import { getWebSocketClient, disposeWebSocketClient } from './websocketClient';
 import { serializeProps, getChangedKeys } from './serializer';
 import { installFiberTreeWalker, uninstallFiberTreeWalker, requestTreeSnapshot, requestFullSnapshot, getNodeProps, getNodeHooks, getNodeEffects, getDetailedRenderReason } from './fiberTreeWalker';
-import { installZustandTracker, uninstallZustandTracker } from './zustandTracker';
+import { installZustandTracker, uninstallZustandTracker, type ZustandStoreApi } from './zustandTracker';
 import { installReduxTracker, uninstallReduxTracker, type ReduxStoreApi } from './reduxTracker';
 import { installTanStackQueryTracker, uninstallTanStackQueryTracker, type TanStackQueryClientApi } from './tanstackQueryTracker';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
@@ -119,6 +119,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
   reduxStoreRef.current = reduxStore;
   const queryClientRef = useRef(queryClient);
   queryClientRef.current = queryClient;
+  const enabledRef = useRef(mergedConfig.enabled);
+  enabledRef.current = mergedConfig.enabled;
 
   // ── Early patching — runs during render (top-down, before children render) ──
   // Must happen in render phase, NOT in useEffect/useLayoutEffect, because:
@@ -163,7 +165,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     // Handle messages from extension
     const unsubMessage = client.onMessage((message) => {
       try {
-      switch (message.type) {
+        switch (message.type) {
         case 'ext:ping':
           client.sendImmediate({ type: 'runtime:ready', appName: mergedConfig.appName });
           break;
@@ -173,7 +175,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           // Each tracker installed independently so one failure doesn't block others
           if (message.options?.trackZustand && storesRef.current && Object.keys(storesRef.current).length > 0) {
             safeTrackerOp('Zustand install', () =>
-              installZustandTracker(storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>, client));
+              installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client));
           }
           if (message.options?.trackRedux && reduxStoreRef.current) {
             safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
@@ -215,59 +217,47 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           break;
 
         case 'ext:requestNodeProps': {
-          const nodeId = (message as { nodeId?: string }).nodeId;
-          if (nodeId) {
-            const props = getNodeProps(nodeId);
-            client.sendImmediate({
-              type: 'runtime:nodeProps',
-              nodeId,
-              props: props || {},
-              timestamp: Date.now(),
-            });
-          }
+          const props = getNodeProps(message.nodeId);
+          client.sendImmediate({
+            type: 'runtime:nodeProps',
+            nodeId: message.nodeId,
+            props: props || {},
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'ext:requestNodeHooks': {
-          const hookNodeId = (message as { nodeId?: string }).nodeId;
-          if (hookNodeId) {
-            const hooks = getNodeHooks(hookNodeId);
-            client.sendImmediate({
-              type: 'runtime:nodeHooks',
-              nodeId: hookNodeId,
-              hooks: hooks || [],
-              timestamp: Date.now(),
-            });
-          }
+          const hooks = getNodeHooks(message.nodeId);
+          client.sendImmediate({
+            type: 'runtime:nodeHooks',
+            nodeId: message.nodeId,
+            hooks: hooks || [],
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'ext:requestNodeEffects': {
-          const effectNodeId = (message as { nodeId?: string }).nodeId;
-          if (effectNodeId) {
-            const effects = getNodeEffects(effectNodeId);
-            client.sendImmediate({
-              type: 'runtime:nodeEffects',
-              nodeId: effectNodeId,
-              effects: effects || [],
-              timestamp: Date.now(),
-            });
-          }
+          const effects = getNodeEffects(message.nodeId);
+          client.sendImmediate({
+            type: 'runtime:nodeEffects',
+            nodeId: message.nodeId,
+            effects: effects || [],
+            timestamp: Date.now(),
+          });
           break;
         }
 
         case 'ext:requestDetailedRenderReason': {
-          const reasonNodeId = (message as { nodeId?: string }).nodeId;
-          if (reasonNodeId) {
-            const reason = getDetailedRenderReason(reasonNodeId);
-            if (reason) {
-              client.sendImmediate({
-                type: 'runtime:detailedRenderReason',
-                nodeId: reasonNodeId,
-                reason,
-                timestamp: Date.now(),
-              });
-            }
+          const reason = getDetailedRenderReason(message.nodeId);
+          if (reason) {
+            client.sendImmediate({
+              type: 'runtime:detailedRenderReason',
+              nodeId: message.nodeId,
+              reason,
+              timestamp: Date.now(),
+            });
           }
           break;
         }
@@ -278,18 +268,15 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
           break;
 
         case 'ext:requestTimeline': {
-          const timelineNodeId = (message as { nodeId?: string }).nodeId;
-          if (timelineNodeId) {
-            const events = getTimeline(timelineNodeId);
-            const componentName = timelineNodeId.split('/').pop()?.replace(/-\d+$/, '') ?? 'Unknown';
-            for (const event of events) {
-              client.sendImmediate({
-                type: 'runtime:timelineEvent',
-                nodeId: timelineNodeId,
-                componentName,
-                event,
-              });
-            }
+          const events = getTimeline(message.nodeId);
+          const componentName = message.nodeId.split('/').pop()?.replace(/-\d+$/, '') ?? 'Unknown';
+          for (const event of events) {
+            client.sendImmediate({
+              type: 'runtime:timelineEvent',
+              nodeId: message.nodeId,
+              componentName,
+              event,
+            });
           }
           break;
         }
@@ -305,38 +292,27 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
         // --- Individual tracker start/stop (sidebar panel show/hide) ---
 
         case 'ext:startReduxTracking':
-          if (reduxStoreRef.current) {
-            safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
-          }
+          if (reduxStoreRef.current) safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
           break;
         case 'ext:stopReduxTracking':
           safeTrackerOp('Redux uninstall', uninstallReduxTracker);
           break;
-
         case 'ext:startRouterTracking':
           safeTrackerOp('Router install', () => installRouterTracker(client));
           break;
         case 'ext:stopRouterTracking':
           safeTrackerOp('Router uninstall', uninstallRouterTracker);
           break;
-
         case 'ext:startZustandTracking':
           if (storesRef.current && Object.keys(storesRef.current).length > 0) {
-            safeTrackerOp('Zustand install', () =>
-              installZustandTracker(
-                storesRef.current as Record<string, { subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void; getState: () => Record<string, unknown> }>,
-                client,
-              ));
+            safeTrackerOp('Zustand install', () => installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client));
           }
           break;
         case 'ext:stopZustandTracking':
           safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
           break;
-
         case 'ext:startTanstackTracking':
-          if (queryClientRef.current) {
-            safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
-          }
+          if (queryClientRef.current) safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
           break;
         case 'ext:stopTanstackTracking':
           safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
@@ -345,7 +321,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
         case 'ext:requestState':
           // Legacy — kept for backward compatibility
           break;
-      }
+        }
       } catch (error) {
         console.error(`[FloTrace] Error handling message type "${message.type}":`, error);
       }
@@ -377,30 +353,25 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
   }, [mergedConfig.enabled, mergedConfig.port, mergedConfig.appName]);
 
   /**
-   * Profiler callback - called every time a component renders
+   * Profiler callback — stable reference via useCallback to avoid
+   * unnecessary Profiler re-subscriptions on parent re-renders.
    */
-  const onRenderCallback = (
+  const onRenderCallback = useCallback((
     id: string,
     phase: 'mount' | 'update' | 'nested-update',
     actualDuration: number,
     baseDuration: number,
-    startTime: number,
+    _startTime: number,
     commitTime: number
   ) => {
     try {
-      if (!mergedConfig.enabled) {
-        return;
-      }
+      if (!enabledRef.current) return;
 
       const client = getWebSocketClient();
-      if (!client.connected) {
-        return;
-      }
+      if (!client.connected) return;
 
-      // Convert nested-update to update for simplicity
       const normalizedPhase = phase === 'nested-update' ? 'update' : phase;
 
-      // Send render event
       client.send({
         type: 'runtime:render',
         componentName: id,
@@ -416,7 +387,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     } catch (error) {
       console.error('[FloTrace] Error in Profiler callback:', error);
     }
-  };
+  }, []);
 
   const contextValue: FloTraceContextValue = {
     connected,

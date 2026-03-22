@@ -19,7 +19,7 @@ import { serializeStoreState, buildCorrelatedRequests } from './storeUtils';
 import type { FloTraceWebSocketClient } from './websocketClient';
 
 /** Minimal Zustand store interface — only what we need to subscribe */
-interface ZustandStoreApi {
+export interface ZustandStoreApi {
   subscribe: (listener: (state: Record<string, unknown>, prevState: Record<string, unknown>) => void) => () => void;
   getState: () => Record<string, unknown>;
 }
