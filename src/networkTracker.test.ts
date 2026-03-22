@@ -304,8 +304,9 @@ describe('networkTracker', () => {
       vi.advanceTimersByTime(500);
 
       // Check that client.send was called with entries containing method 'GET'
-      if (client.send.mock.calls.length > 0) {
-        const lastCall = client.send.mock.calls[client.send.mock.calls.length - 1][0];
+      const sendMock = client.send as ReturnType<typeof vi.fn>;
+      if (sendMock.mock.calls.length > 0) {
+        const lastCall = sendMock.mock.calls[sendMock.mock.calls.length - 1][0];
         if (lastCall?.requests) {
           const entry = lastCall.requests.find((r: { urlPath: string }) => r.urlPath === '/api/test');
           if (entry) {

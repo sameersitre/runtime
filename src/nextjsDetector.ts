@@ -6,7 +6,7 @@
  * All detection is heuristic and best-effort. Server Components themselves
  * don't create client-side fibers, so detection is approximate.
  */
-import type { WebSocketClient } from "./websocketClient";
+import type { FloTraceWebSocketClient } from "./websocketClient";
 
 /** File path patterns that suggest a Next.js Server Component */
 const SERVER_COMPONENT_PATTERNS: RegExp[] = [
@@ -39,7 +39,7 @@ let detectionEmitted = false;
  * Detect Next.js presence from window globals and emit runtime:nextjsContext once.
  * Safe to call repeatedly — emits at most once per page load.
  */
-export function maybeEmitNextjsContext(client: WebSocketClient): void {
+export function maybeEmitNextjsContext(client: FloTraceWebSocketClient): void {
   if (detectionEmitted) return;
 
   try {

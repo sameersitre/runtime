@@ -5,11 +5,11 @@ Runtime package for FloTrace — enables real-time React component tree visualiz
 ## Installation
 
 ```bash
-npm install @flotrace/runtime
+npm install -D @flotrace/runtime
 # or
-yarn add @flotrace/runtime
+yarn add -D @flotrace/runtime
 # or
-pnpm add @flotrace/runtime
+pnpm add -D @flotrace/runtime
 ```
 
 **Peer dependencies:** React >= 16.9.0 (requires `<Profiler>` API)
@@ -375,12 +375,14 @@ Each release script automatically:
 
 ### From the monorepo root
 
-```bash
-npm run runtime:release:patch   # Bump patch + build + publish
-npm run runtime:release:minor   # Bump minor + build + publish
-npm run runtime:release:major   # Bump major + build + publish
-npm run runtime:publish         # Publish current version (no bump)
-```
+| Script | Action |
+|--------|--------|
+| `npm run runtime:release:patch` | Bump patch + build + publish (e.g. `0.1.0` → `0.1.1`) |
+| `npm run runtime:release:minor` | Bump minor + build + publish (e.g. `0.1.0` → `0.2.0`) |
+| `npm run runtime:release:major` | Bump major + build + publish (e.g. `0.1.0` → `1.0.0`) |
+| `npm run runtime:publish` | Publish current version as-is (no version bump) |
+
+> **Note:** `runtime:publish` publishes whatever version is currently in `package.json`. Use this for the first publish or to re-publish a fixed build without bumping the version. The `release:*` scripts auto-increment the version, create a git commit + tag, then publish.
 
 ## License
 

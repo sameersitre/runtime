@@ -6,7 +6,7 @@
  * Privacy guarantee: only metadata is captured (URL path, headers, size).
  * Response bodies are never read or transmitted.
  */
-import type { WebSocketClient } from "./websocketClient";
+import type { FloTraceWebSocketClient } from "./websocketClient";
 
 /** URL patterns that identify Next.js RSC / data fetches */
 const RSC_URL_PATTERNS: RegExp[] = [
@@ -38,14 +38,14 @@ function extractRoute(url: string): string {
 }
 
 let originalFetch: typeof fetch | null = null;
-let interceptorClient: WebSocketClient | null = null;
+let interceptorClient: FloTraceWebSocketClient | null = null;
 let isInstalled = false;
 
 /**
  * Install the RSC payload interceptor.
  * Safe to call multiple times — installs once.
  */
-export function installRscPayloadInterceptor(client: WebSocketClient): void {
+export function installRscPayloadInterceptor(client: FloTraceWebSocketClient): void {
   if (isInstalled || typeof globalThis.fetch !== 'function') return;
   isInstalled = true;
   interceptorClient = client;

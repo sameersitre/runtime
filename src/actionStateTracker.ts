@@ -3,7 +3,7 @@
  * Emits runtime:actionState when isPending transitions or state changes.
  * Called by fiberTreeWalker after each successful tree build.
  */
-import type { WebSocketClient } from "./websocketClient";
+import type { FloTraceWebSocketClient } from "./websocketClient";
 import type { SerializedValue } from "./types";
 import { serializeValue } from "./serializer";
 
@@ -88,7 +88,7 @@ function extractActionEntries(fiber: Fiber): Array<{
  */
 export function scanActionStateChanges(
   fiberRefMap: Map<string, Fiber>,
-  client: WebSocketClient,
+  client: FloTraceWebSocketClient,
 ): void {
   try {
     for (const [nodeId, fiber] of fiberRefMap) {
