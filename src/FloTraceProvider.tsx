@@ -1,14 +1,30 @@
 import React, { useCallback, useEffect, useRef, createContext, useContext, type ReactNode, Profiler } from 'react';
-import type { FloTraceConfig, TrackingOptions } from './types';
-import { DEFAULT_CONFIG } from './types';
-import { getWebSocketClient, disposeWebSocketClient } from './websocketClient';
-import { serializeProps, getChangedKeys } from './serializer';
-import { installFiberTreeWalker, uninstallFiberTreeWalker, requestTreeSnapshot, requestFullSnapshot, getNodeProps, getNodeHooks, getNodeEffects, getDetailedRenderReason } from './fiberTreeWalker';
-import { installZustandTracker, uninstallZustandTracker, type ZustandStoreApi } from './zustandTracker';
-import { installReduxTracker, uninstallReduxTracker, type ReduxStoreApi } from './reduxTracker';
-import { installTanStackQueryTracker, uninstallTanStackQueryTracker, type TanStackQueryClientApi } from './tanstackQueryTracker';
+import type { FloTraceConfig, TrackingOptions, ZustandStoreApi, ReduxStoreApi, TanStackQueryClientApi } from '@flotrace/runtime-core';
+import {
+  DEFAULT_CONFIG,
+  getWebSocketClient,
+  disposeWebSocketClient,
+  serializeProps,
+  getChangedKeys,
+  installFiberTreeWalker,
+  uninstallFiberTreeWalker,
+  requestTreeSnapshot,
+  requestFullSnapshot,
+  getNodeProps,
+  getNodeHooks,
+  getNodeEffects,
+  getDetailedRenderReason,
+  installZustandTracker,
+  uninstallZustandTracker,
+  installReduxTracker,
+  uninstallReduxTracker,
+  installTanStackQueryTracker,
+  uninstallTanStackQueryTracker,
+  installTimelineTracker,
+  uninstallTimelineTracker,
+  getTimeline,
+} from '@flotrace/runtime-core';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
-import { installTimelineTracker, uninstallTimelineTracker, getTimeline } from './timelineTracker';
 import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
 
 // Module-level timer for deferred cleanup (React Strict Mode handling).
@@ -31,7 +47,7 @@ function safeTrackerOp(name: string, op: () => void): void {
 interface FloTraceContextValue {
   connected: boolean;
   enabled: boolean;
-  config: Required<FloTraceConfig>;
+  config: Required<Omit<FloTraceConfig, 'getAppUrl'>> & Pick<FloTraceConfig, 'getAppUrl'>;
 }
 
 const FloTraceContext = createContext<FloTraceContextValue | null>(null);
@@ -109,7 +125,13 @@ export interface FloTraceProviderProps {
  * ```
  */
 export function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClient }: FloTraceProviderProps): JSX.Element {
-  const mergedConfig = { ...DEFAULT_CONFIG, ...config };
+  const mergedConfig = {
+    ...DEFAULT_CONFIG,
+    // Web default: expose the current page URL as the `appUrl` in runtime:ready.
+    // Runtime-core defaults this to undefined so it stays platform-agnostic.
+    getAppUrl: () => (typeof window !== 'undefined' ? window.location.href : undefined),
+    ...config,
+  };
   const [connected, setConnected] = React.useState(false);
   const trackingOptionsRef = useRef<TrackingOptions>({});
   // Stable refs for stores to avoid stale closures in message handler

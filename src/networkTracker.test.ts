@@ -28,7 +28,7 @@ import {
   installNetworkTracker,
   uninstallNetworkTracker,
 } from './networkTracker';
-import type { FloTraceWebSocketClient } from './websocketClient';
+import type { FloTraceWebSocketClient } from '@flotrace/runtime-core';
 
 // ============================================================================
 // Helpers

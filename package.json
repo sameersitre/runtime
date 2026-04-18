@@ -25,6 +25,9 @@
     "release:minor": "npm version minor && npm publish",
     "release:major": "npm version major && npm publish"
   },
+  "dependencies": {
+    "@flotrace/runtime-core": "0.1.0"
+  },
   "peerDependencies": {
     "react": ">=16.9.0",
     "@types/react": ">=16.9.0"

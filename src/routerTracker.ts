@@ -16,7 +16,7 @@
  * and can be added as a future enhancement.
  */
 
-import type { FloTraceWebSocketClient } from './websocketClient';
+import type { FloTraceWebSocketClient } from '@flotrace/runtime-core';
 
 // Module-level state (mirrors zustandTracker/reduxTracker pattern)
 let isInstalled = false;
