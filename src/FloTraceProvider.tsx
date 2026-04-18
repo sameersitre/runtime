@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, createContext, useContext, type ReactNode, Profiler } from 'react';
-import type { FloTraceConfig, TrackingOptions, ZustandStoreApi, ReduxStoreApi, TanStackQueryClientApi } from '@flotrace/runtime-core';
+import type { FloTraceConfig, ResolvedFloTraceConfig, TrackingOptions, ZustandStoreApi, ReduxStoreApi, TanStackQueryClientApi } from '@flotrace/runtime-core';
 import {
   DEFAULT_CONFIG,
   getWebSocketClient,
@@ -47,7 +47,7 @@ function safeTrackerOp(name: string, op: () => void): void {
 interface FloTraceContextValue {
   connected: boolean;
   enabled: boolean;
-  config: Required<Omit<FloTraceConfig, 'getAppUrl'>> & Pick<FloTraceConfig, 'getAppUrl'>;
+  config: ResolvedFloTraceConfig;
 }
 
 const FloTraceContext = createContext<FloTraceContextValue | null>(null);
@@ -125,11 +125,27 @@ export interface FloTraceProviderProps {
  * ```
  */
 export function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClient }: FloTraceProviderProps): JSX.Element {
-  const mergedConfig = {
+  // Refuse to attach inside React Native. Codebases that target both web and native
+  // often wrap their shared root with whichever provider they imported first — without
+  // this guard, the web provider would try to patch a non-existent DOM on the RN bundle.
+  // Detection: React Native sets `navigator.product === 'ReactNative'` (and has no `document`).
+  if (
+    typeof navigator !== 'undefined' &&
+    (navigator as { product?: string }).product === 'ReactNative'
+  ) {
+    console.warn(
+      '[FloTrace] FloTraceProvider (from @flotrace/runtime) detected a React Native environment. ' +
+      'Install @flotrace/runtime-native and use FloTraceProviderNative instead. Skipping attach.',
+    );
+    return <>{children}</>;
+  }
+
+  const mergedConfig: ResolvedFloTraceConfig = {
     ...DEFAULT_CONFIG,
     // Web default: expose the current page URL as the `appUrl` in runtime:ready.
     // Runtime-core defaults this to undefined so it stays platform-agnostic.
     getAppUrl: () => (typeof window !== 'undefined' ? window.location.href : undefined),
+    platform: 'web',
     ...config,
   };
   const [connected, setConnected] = React.useState(false);
