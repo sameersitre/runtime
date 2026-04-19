@@ -2,6 +2,8 @@
 
 Runtime package for FloTrace — enables real-time React component tree visualization, render tracking, state management monitoring, and network health analysis in the FloTrace desktop app.
 
+> **Using React Native?** Install [`@flotrace/runtime-native`](https://www.npmjs.com/package/@flotrace/runtime-native) instead. It's the dedicated adapter for iOS / Android — `@flotrace/runtime` patches `fetch`, `XMLHttpRequest`, `JSON.parse`, and `Response.prototype.json` in ways that crash the React Native JS bridge. See the [migration guide](../../docs/migration-runtime-native.md) if you're switching a shared codebase.
+
 ## Installation
 
 ```bash

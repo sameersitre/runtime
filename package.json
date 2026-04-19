@@ -1,6 +1,6 @@
 {
   "name": "@flotrace/runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Runtime package for FloTrace - enables real-time render tracking in your React app",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -20,7 +20,7 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run clean && npm run build && npm run typecheck",
+    "prepublishOnly": "npm run -w @flotrace/runtime-core build && npm run clean && npm run build && npm run typecheck",
     "release:patch": "npm version patch && npm publish",
     "release:minor": "npm version minor && npm publish",
     "release:major": "npm version major && npm publish"
