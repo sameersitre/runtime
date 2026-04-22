@@ -23,6 +23,7 @@ import {
   installTimelineTracker,
   uninstallTimelineTracker,
   getTimeline,
+  detectWebFramework,
 } from '@flotrace/runtime-core';
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
@@ -39,6 +40,40 @@ function safeTrackerOp(name: string, op: () => void): void {
   } catch (error) {
     console.error(`[FloTrace] ${name}:`, error);
   }
+}
+
+/**
+ * Derive a human-readable app name from the DOM. Priority:
+ *   1. `<meta name="application-name">` — MDN-authoritative per spec. Next.js
+ *      App Router's `metadata.applicationName` field auto-renders this, so
+ *      Next.js users get the right name with zero FloTrace config.
+ *   2. `document.title` at mount time — snapshot once so route-driven title
+ *      churn doesn't bleed into appName (appId, not appName, is the upsert key).
+ *   3. `location.hostname` — stable, route-independent fallback.
+ *   4. Default 'React App' from DEFAULT_CONFIG (never reached in practice).
+ */
+function deriveWebAppName(): string {
+  if (typeof document !== 'undefined') {
+    const metaName = document
+      .querySelector('meta[name="application-name"]')
+      ?.getAttribute('content')
+      ?.trim();
+    if (metaName) return metaName;
+    const title = document.title?.trim();
+    if (title) return title;
+  }
+  if (typeof location !== 'undefined' && location.hostname) return location.hostname;
+  return DEFAULT_CONFIG.appName;
+}
+
+/**
+ * Stable app identifier derived from the deployment origin. `location.origin`
+ * distinguishes `http://localhost:5173` from `http://localhost:5174` (two dev
+ * servers = two projects in admin) while staying constant across route changes
+ * and page reloads for the same deployment.
+ */
+function deriveWebAppId(): string {
+  return typeof location !== 'undefined' && location.origin ? location.origin : 'web-app';
 }
 
 /**
@@ -140,6 +175,8 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     return <>{children}</>;
   }
 
+  const framework = detectWebFramework();
+
   const mergedConfig: ResolvedFloTraceConfig = {
     ...DEFAULT_CONFIG,
     // Web default: expose the current page URL as the `appUrl` in runtime:ready.
@@ -147,6 +184,12 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     getAppUrl: () => (typeof window !== 'undefined' ? window.location.href : undefined),
     platform: 'web',
     ...config,
+    // Derived values fill in only when the user didn't supply a static one.
+    // Placed AFTER `...config` so explicit user values still win via `??`.
+    appName: config.appName ?? deriveWebAppName(),
+    appId: config.appId ?? deriveWebAppId(),
+    frameworkName: config.frameworkName ?? framework.frameworkName,
+    frameworkVersion: config.frameworkVersion ?? framework.frameworkVersion,
   };
   const [connected, setConnected] = React.useState(false);
   const trackingOptionsRef = useRef<TrackingOptions>({});
@@ -204,8 +247,12 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     const unsubMessage = client.onMessage((message) => {
       try {
         switch (message.type) {
+        // Heartbeat liveness is handled by the dedicated `runtime:pong` path
+        // in websocketClient. We intentionally do NOT re-send `runtime:ready`
+        // on every `ext:ping` — a truncated ready (only appName, no appId /
+        // platform / versions) would clobber the server's client registry
+        // metadata on every 5s tick. The initial `onopen` ready is authoritative.
         case 'ext:ping':
-          client.sendImmediate({ type: 'runtime:ready', appName: mergedConfig.appName });
           break;
 
         case 'ext:startTracking':
