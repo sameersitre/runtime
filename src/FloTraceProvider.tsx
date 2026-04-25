@@ -26,6 +26,9 @@ import {
   detectWebFramework,
   resolveValueTrace,
 } from '@flotrace/runtime-core';
+import pkg from '../package.json';
+
+const RUNTIME_VERSION: string = pkg.version;
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
 import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
 
@@ -191,6 +194,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     appId: config.appId ?? deriveWebAppId(),
     frameworkName: config.frameworkName ?? framework.frameworkName,
     frameworkVersion: config.frameworkVersion ?? framework.frameworkVersion,
+    runtimeVersion: config.runtimeVersion ?? RUNTIME_VERSION,
   };
   const [connected, setConnected] = React.useState(false);
   const trackingOptionsRef = useRef<TrackingOptions>({});
