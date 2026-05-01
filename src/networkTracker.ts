@@ -268,6 +268,13 @@ function patchFetch(): void {
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
+    // Bail to pass-through if we've been uninstalled but a chained sibling
+    // restored us as globalThis.fetch — running the full tracking path here
+    // would leak entries into a buffer/index that nothing drains anymore.
+    if (!isInstalled && !isPrewarmed) {
+      return capturedPreviousFetch.call(globalThis, input, init);
+    }
+
     const url = extractUrl(input);
 
     // Skip noise URLs — call previous fetch directly with zero overhead
