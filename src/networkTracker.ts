@@ -258,6 +258,12 @@ function patchFetch(): void {
   // Store current fetch (may be RSC-interceptor-patched — we chain on top)
   previousFetch = globalThis.fetch;
 
+  // Capture into a closure const. Module-level `previousFetch` gets nulled
+  // on uninstall, but if a chained sibling (RSC interceptor) is restored
+  // after us, our wrapper may still be invoked — so the wrapper must close
+  // over its own immutable copy of the inner fetch.
+  const capturedPreviousFetch = previousFetch;
+
   const trackedFetch = async function trackedFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
@@ -266,7 +272,7 @@ function patchFetch(): void {
 
     // Skip noise URLs — call previous fetch directly with zero overhead
     if (isNoiseUrl(url)) {
-      return previousFetch!.call(globalThis, input, init);
+      return capturedPreviousFetch.call(globalThis, input, init);
     }
 
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -287,7 +293,7 @@ function patchFetch(): void {
     pushEntry({ ...entry });
 
     try {
-      const response = await previousFetch!.call(globalThis, input, init);
+      const response = await capturedPreviousFetch.call(globalThis, input, init);
 
       // Don't update if already aborted
       if (entry.state !== 'aborted') {
