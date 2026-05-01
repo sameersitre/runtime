@@ -86,6 +86,10 @@ const earlyRequestIndexMap = new Map<string, number>();
 
 /** Original fetch before our patch (may already be RSC-interceptor-patched) */
 let previousFetch: typeof fetch | null = null;
+/** Sentinel reference to our installed wrapper, so uninstall can detect when
+ *  another patch (e.g. RSC interceptor) tore down between our install/uninstall
+ *  and writing previousFetch back would resurrect a dangling closure. */
+let trackedFetchRef: typeof fetch | null = null;
 
 /** Original XHR methods */
 let originalXhrOpen: typeof XMLHttpRequest.prototype.open | null = null;
@@ -191,10 +195,16 @@ export function installNetworkTracker(wsClient: FloTraceWebSocketClient): void {
 export function uninstallNetworkTracker(): void {
   if (!isInstalled && !isPrewarmed) return;
 
-  // Restore fetch — restores to whatever was there before us (RSC-patched or native)
+  // Restore fetch only if our wrapper is still the one installed.
+  // If another patch (RSC interceptor) already tore down and overwrote
+  // globalThis.fetch with native, blindly writing previousFetch back would
+  // resurrect that patch's now-dangling closure. Detect via sentinel.
   if (previousFetch) {
-    globalThis.fetch = previousFetch;
+    if (globalThis.fetch === trackedFetchRef) {
+      globalThis.fetch = previousFetch;
+    }
     previousFetch = null;
+    trackedFetchRef = null;
   }
 
   // Restore XHR
@@ -248,7 +258,7 @@ function patchFetch(): void {
   // Store current fetch (may be RSC-interceptor-patched — we chain on top)
   previousFetch = globalThis.fetch;
 
-  globalThis.fetch = async function trackedFetch(
+  const trackedFetch = async function trackedFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
@@ -306,6 +316,9 @@ function patchFetch(): void {
       throw err;
     }
   };
+
+  trackedFetchRef = trackedFetch;
+  globalThis.fetch = trackedFetch;
 }
 
 // ============================================================================
