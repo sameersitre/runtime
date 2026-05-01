@@ -86,6 +86,10 @@ const earlyRequestIndexMap = new Map<string, number>();
 
 /** Original fetch before our patch (may already be RSC-interceptor-patched) */
 let previousFetch: typeof fetch | null = null;
+/** Sentinel reference to our installed wrapper, so uninstall can detect when
+ *  another patch (e.g. RSC interceptor) tore down between our install/uninstall
+ *  and writing previousFetch back would resurrect a dangling closure. */
+let trackedFetchRef: typeof fetch | null = null;
 
 /** Original XHR methods */
 let originalXhrOpen: typeof XMLHttpRequest.prototype.open | null = null;
@@ -191,10 +195,16 @@ export function installNetworkTracker(wsClient: FloTraceWebSocketClient): void {
 export function uninstallNetworkTracker(): void {
   if (!isInstalled && !isPrewarmed) return;
 
-  // Restore fetch — restores to whatever was there before us (RSC-patched or native)
+  // Restore fetch only if our wrapper is still the one installed.
+  // If another patch (RSC interceptor) already tore down and overwrote
+  // globalThis.fetch with native, blindly writing previousFetch back would
+  // resurrect that patch's now-dangling closure. Detect via sentinel.
   if (previousFetch) {
-    globalThis.fetch = previousFetch;
+    if (globalThis.fetch === trackedFetchRef) {
+      globalThis.fetch = previousFetch;
+    }
     previousFetch = null;
+    trackedFetchRef = null;
   }
 
   // Restore XHR
@@ -248,15 +258,28 @@ function patchFetch(): void {
   // Store current fetch (may be RSC-interceptor-patched — we chain on top)
   previousFetch = globalThis.fetch;
 
-  globalThis.fetch = async function trackedFetch(
+  // Capture into a closure const. Module-level `previousFetch` gets nulled
+  // on uninstall, but if a chained sibling (RSC interceptor) is restored
+  // after us, our wrapper may still be invoked — so the wrapper must close
+  // over its own immutable copy of the inner fetch.
+  const capturedPreviousFetch = previousFetch;
+
+  const trackedFetch = async function trackedFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
+    // Bail to pass-through if we've been uninstalled but a chained sibling
+    // restored us as globalThis.fetch — running the full tracking path here
+    // would leak entries into a buffer/index that nothing drains anymore.
+    if (!isInstalled && !isPrewarmed) {
+      return capturedPreviousFetch.call(globalThis, input, init);
+    }
+
     const url = extractUrl(input);
 
     // Skip noise URLs — call previous fetch directly with zero overhead
     if (isNoiseUrl(url)) {
-      return previousFetch!.call(globalThis, input, init);
+      return capturedPreviousFetch.call(globalThis, input, init);
     }
 
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -277,7 +300,7 @@ function patchFetch(): void {
     pushEntry({ ...entry });
 
     try {
-      const response = await previousFetch!.call(globalThis, input, init);
+      const response = await capturedPreviousFetch.call(globalThis, input, init);
 
       // Don't update if already aborted
       if (entry.state !== 'aborted') {
@@ -306,6 +329,9 @@ function patchFetch(): void {
       throw err;
     }
   };
+
+  trackedFetchRef = trackedFetch;
+  globalThis.fetch = trackedFetch;
 }
 
 // ============================================================================
