@@ -25,6 +25,11 @@ import {
   getTimeline,
   detectWebFramework,
   resolveValueTrace,
+  // Phase 4 — periodic callSiteMetrics emit + duplicate-key wire emitter
+  computeCallSiteMetricsPayload,
+  setDuplicateKeyEmitter,
+  isJsxRuntimeActive,
+  clearCallSiteRenders,
 } from '@flotrace/runtime-core';
 import pkg from '../package.json';
 
@@ -453,10 +458,59 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     // Connect (no-op if already connected from a previous mount)
     client.connect();
 
+    // ─── JSX runtime: callSiteMetrics + duplicate-key wiring (Milestone 8 P4) ───
+    // Only activate when the user opted into `"jsxImportSource": "@flotrace/runtime-core"`
+    // — `isJsxRuntimeActive()` returns true once the first jsxDEV call sets the
+    // global sentinel. If not adopted, both surfaces are pure no-ops.
+    //
+    // Both run inside this effect so they tear down with the rest of the
+    // tracker stack on unmount (Strict Mode cancellation included).
+    setDuplicateKeyEmitter((evt) => {
+      try {
+        if (!client.connected) return;
+        client.send({
+          type: 'runtime:duplicateKey',
+          callSiteId: evt.callSiteId,
+          fileName: evt.fileName,
+          lineNumber: evt.lineNumber,
+          columnNumber: evt.columnNumber,
+          duplicateKey: evt.duplicateKey,
+          occurrences: evt.occurrences,
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        console.error('[FloTrace] Error emitting runtime:duplicateKey:', error);
+      }
+    });
+
+    // Periodic flush of per-callsite render rates. Computed from the ring
+    // buffer on each tick — `null` payload (no recent activity) short-
+    // circuits the WS send so idle apps stay silent.
+    const callSiteMetricsTimer = setInterval(() => {
+      try {
+        if (!client.connected) return;
+        if (!isJsxRuntimeActive()) return;
+        const metrics = computeCallSiteMetricsPayload();
+        if (metrics === null) return;
+        client.send({
+          type: 'runtime:callSiteMetrics',
+          metrics,
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        console.error('[FloTrace] Error emitting runtime:callSiteMetrics:', error);
+      }
+    }, 1000);
+
     return () => {
       // Immediately unsubscribe handlers to prevent duplicates on remount
       unsubConnection();
       unsubMessage();
+      // JSX runtime cleanup — clear the emitter so deferred-cleanup window
+      // doesn't keep sending dupe-key events for a dead session, and stop
+      // the periodic metrics timer.
+      setDuplicateKeyEmitter(null);
+      clearInterval(callSiteMetricsTimer);
 
       // Defer heavy cleanup so Strict Mode remount can cancel it.
       // On real unmount, this runs after 100ms and tears everything down.
@@ -471,6 +525,9 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
         safeTrackerOp('cleanup timelineTracker', uninstallTimelineTracker);
         safeTrackerOp('cleanup networkTracker', uninstallNetworkTracker);
         safeTrackerOp('cleanup websocketClient', disposeWebSocketClient);
+        // Clear the per-callsite ring buffer so a remount after disconnect
+        // doesn't accumulate stale entries across sessions.
+        safeTrackerOp('cleanup callSiteRenders', clearCallSiteRenders);
       }, 100);
     };
   }, [mergedConfig.enabled, mergedConfig.port, mergedConfig.appName]);
