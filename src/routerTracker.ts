@@ -49,58 +49,54 @@ export function installRouterTracker(wsClient: FloTraceWebSocketClient): void {
   console.log('[FloTrace] Installing router tracker');
 
   try {
-  isInstalled = true;
-  client = wsClient;
+    isInstalled = true;
+    client = wsClient;
 
-  // Save original methods
-  originalPushState = history.pushState.bind(history);
-  originalReplaceState = history.replaceState.bind(history);
+    // Save original methods
+    originalPushState = history.pushState.bind(history);
+    originalReplaceState = history.replaceState.bind(history);
 
-  // Wrap history.pushState — called by React Router on <Link> clicks and navigate()
-  // Critical: always call original first so navigation works even if FloTrace fails
-  history.pushState = function (
-    data: unknown,
-    unused: string,
-    url?: string | URL | null
-  ) {
-    originalPushState!(data, unused, url);
-    try {
-      scheduleRouterUpdate();
-    } catch (error) {
-      console.error('[FloTrace] Error in pushState handler:', error);
-    }
-  };
+    // Wrap history.pushState — called by React Router on <Link> clicks and navigate()
+    // Critical: always call original first so navigation works even if FloTrace fails
+    history.pushState = function (data: unknown, unused: string, url?: string | URL | null) {
+      originalPushState!(data, unused, url);
+      try {
+        scheduleRouterUpdate();
+      } catch (error) {
+        console.error('[FloTrace] Error in pushState handler:', error);
+      }
+    };
 
-  // Wrap history.replaceState — called by React Router on redirect/replace navigation
-  history.replaceState = function (
-    data: unknown,
-    unused: string,
-    url?: string | URL | null
-  ) {
-    originalReplaceState!(data, unused, url);
-    try {
-      scheduleRouterUpdate();
-    } catch (error) {
-      console.error('[FloTrace] Error in replaceState handler:', error);
-    }
-  };
+    // Wrap history.replaceState — called by React Router on redirect/replace navigation
+    history.replaceState = function (data: unknown, unused: string, url?: string | URL | null) {
+      originalReplaceState!(data, unused, url);
+      try {
+        scheduleRouterUpdate();
+      } catch (error) {
+        console.error('[FloTrace] Error in replaceState handler:', error);
+      }
+    };
 
-  // Listen for popstate — fired on back/forward button clicks
-  popstateHandler = () => {
-    try {
-      scheduleRouterUpdate();
-    } catch (error) {
-      console.error('[FloTrace] Error in popstate handler:', error);
-    }
-  };
-  window.addEventListener('popstate', popstateHandler);
+    // Listen for popstate — fired on back/forward button clicks
+    popstateHandler = () => {
+      try {
+        scheduleRouterUpdate();
+      } catch (error) {
+        console.error('[FloTrace] Error in popstate handler:', error);
+      }
+    };
+    window.addEventListener('popstate', popstateHandler);
 
-  // Send initial state immediately (current URL on install)
-  sendRouterUpdate();
+    // Send initial state immediately (current URL on install)
+    sendRouterUpdate();
   } catch (error) {
     console.error('[FloTrace] Failed to install router tracker:', error);
     // Clean up any partial installation
-    try { uninstallRouterTracker(); } catch (_) { /* ignore cleanup errors */ }
+    try {
+      uninstallRouterTracker();
+    } catch (_) {
+      /* ignore cleanup errors */
+    }
   }
 }
 

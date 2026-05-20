@@ -308,7 +308,9 @@ describe('networkTracker', () => {
       if (sendMock.mock.calls.length > 0) {
         const lastCall = sendMock.mock.calls[sendMock.mock.calls.length - 1][0];
         if (lastCall?.requests) {
-          const entry = lastCall.requests.find((r: { urlPath: string }) => r.urlPath === '/api/test');
+          const entry = lastCall.requests.find(
+            (r: { urlPath: string }) => r.urlPath === '/api/test',
+          );
           if (entry) {
             expect(entry.method).toBe('GET');
           }
@@ -329,7 +331,11 @@ describe('networkTracker', () => {
     });
 
     async function fetchAndFlush(url: string): Promise<void> {
-      try { await globalThis.fetch(url); } catch { /* expected in test env */ }
+      try {
+        await globalThis.fetch(url);
+      } catch {
+        /* expected in test env */
+      }
       vi.advanceTimersByTime(500);
     }
 
@@ -340,7 +346,7 @@ describe('networkTracker', () => {
 
       // After flush, check if any new requests contain google-analytics
       const callsAfter = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const hasAnalytics = callsAfter.some(call =>
+      const hasAnalytics = callsAfter.some((call) =>
         call[0]?.requests?.some((r: { urlPath: string }) => r.urlPath.includes('google-analytics')),
       );
       expect(hasAnalytics).toBe(false);
@@ -350,7 +356,7 @@ describe('networkTracker', () => {
       await fetchAndFlush('http://localhost:3000/__webpack_hmr');
 
       const calls = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const hasHmr = calls.some(call =>
+      const hasHmr = calls.some((call) =>
         call[0]?.requests?.some((r: { urlPath: string }) => r.urlPath.includes('__webpack_hmr')),
       );
       expect(hasHmr).toBe(false);
@@ -360,7 +366,7 @@ describe('networkTracker', () => {
       await fetchAndFlush('http://127.0.0.1:3457/ws');
 
       const calls = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const hasFloTrace = calls.some(call =>
+      const hasFloTrace = calls.some((call) =>
         call[0]?.requests?.some((r: { urlHost: string }) => r.urlHost.includes('127.0.0.1:3457')),
       );
       expect(hasFloTrace).toBe(false);
@@ -370,7 +376,7 @@ describe('networkTracker', () => {
       await fetchAndFlush('chrome-extension://abc123/script.js');
 
       const calls = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const hasExtension = calls.some(call =>
+      const hasExtension = calls.some((call) =>
         call[0]?.requests?.some((r: { urlPath: string }) => r.urlPath.includes('chrome-extension')),
       );
       expect(hasExtension).toBe(false);
@@ -380,7 +386,7 @@ describe('networkTracker', () => {
       await fetchAndFlush('http://localhost:3000/_next/static/chunks/main.js');
 
       const calls = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const hasNextStatic = calls.some(call =>
+      const hasNextStatic = calls.some((call) =>
         call[0]?.requests?.some((r: { urlPath: string }) => r.urlPath.includes('_next/static')),
       );
       expect(hasNextStatic).toBe(false);
@@ -395,12 +401,16 @@ describe('networkTracker', () => {
       const client = makeMockClient();
       installNetworkTracker(client);
 
-      try { await globalThis.fetch('http://localhost/api/test'); } catch { /* expected */ }
+      try {
+        await globalThis.fetch('http://localhost/api/test');
+      } catch {
+        /* expected */
+      }
 
       vi.advanceTimersByTime(500);
 
       const calls = (client.send as ReturnType<typeof vi.fn>).mock.calls;
-      const networkMessages = calls.filter(call => call[0]?.type === 'runtime:networkRequest');
+      const networkMessages = calls.filter((call) => call[0]?.type === 'runtime:networkRequest');
       // Should have at least one flush with runtime:networkRequest type
       if (networkMessages.length > 0) {
         expect(networkMessages[0][0].type).toBe('runtime:networkRequest');
@@ -418,7 +428,7 @@ describe('networkTracker', () => {
       // Even after timer fires, no sends because client.connected is false
       // The initial flush on install also should not send
       const networkCalls = (client.send as ReturnType<typeof vi.fn>).mock.calls.filter(
-        call => call[0]?.type === 'runtime:networkRequest',
+        (call) => call[0]?.type === 'runtime:networkRequest',
       );
       expect(networkCalls).toHaveLength(0);
     });
@@ -443,7 +453,9 @@ describe('networkTracker', () => {
       // Step 2: Make a request during prewarm (no client yet)
       try {
         await globalThis.fetch('http://localhost/api/prewarmed-request');
-      } catch { /* expected in test env */ }
+      } catch {
+        /* expected in test env */
+      }
 
       // Step 3: Install with a connected client — should drain earlyBuffer and flush
       const client = makeMockClient();
@@ -452,7 +464,8 @@ describe('networkTracker', () => {
       // The immediate flush on install should send any buffered entries
       const sendMock = client.send as ReturnType<typeof vi.fn>;
       const networkCalls = sendMock.mock.calls.filter(
-        (call: unknown[]) => (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest',
+        (call: unknown[]) =>
+          (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest',
       );
 
       // If earlyBuffer had entries, they should have been flushed
@@ -474,7 +487,8 @@ describe('networkTracker', () => {
 
       const sendMock = client.send as ReturnType<typeof vi.fn>;
       const networkCalls = sendMock.mock.calls.filter(
-        (call: unknown[]) => (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest',
+        (call: unknown[]) =>
+          (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest',
       );
       expect(networkCalls).toHaveLength(0);
     });
@@ -492,26 +506,38 @@ describe('networkTracker', () => {
     });
 
     async function fetchAndFlush(url: string): Promise<void> {
-      try { await globalThis.fetch(url); } catch { /* expected in test env */ }
+      try {
+        await globalThis.fetch(url);
+      } catch {
+        /* expected in test env */
+      }
       vi.advanceTimersByTime(500);
     }
 
     function getSentUrls(): string[] {
       return (client.send as ReturnType<typeof vi.fn>).mock.calls
-        .filter((call: unknown[]) => (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest')
-        .flatMap((call: unknown[]) => ((call[0] as Record<string, unknown>).requests as Array<{ urlPath: string }>)?.map(r => r.urlPath) ?? []);
+        .filter(
+          (call: unknown[]) =>
+            (call[0] as Record<string, unknown>)?.type === 'runtime:networkRequest',
+        )
+        .flatMap(
+          (call: unknown[]) =>
+            ((call[0] as Record<string, unknown>).requests as Array<{ urlPath: string }>)?.map(
+              (r) => r.urlPath,
+            ) ?? [],
+        );
     }
 
     it('filters analytics URLs case-insensitively', async () => {
       await fetchAndFlush('https://WWW.GOOGLE-ANALYTICS.COM/collect');
       const urls = getSentUrls();
-      expect(urls.some(u => u.toLowerCase().includes('google-analytics'))).toBe(false);
+      expect(urls.some((u) => u.toLowerCase().includes('google-analytics'))).toBe(false);
     });
 
     it('filters mixed-case Sentry URLs', async () => {
       await fetchAndFlush('https://o12345.ingest.SENTRY.IO/api/1234/envelope/');
       const urls = getSentUrls();
-      expect(urls.some(u => u.toLowerCase().includes('sentry'))).toBe(false);
+      expect(urls.some((u) => u.toLowerCase().includes('sentry'))).toBe(false);
     });
 
     it('does NOT filter partial matches in query params', async () => {
@@ -527,19 +553,19 @@ describe('networkTracker', () => {
     it('filters favicon.ico requests', async () => {
       await fetchAndFlush('http://localhost/favicon.ico');
       const urls = getSentUrls();
-      expect(urls.some(u => u.includes('favicon'))).toBe(false);
+      expect(urls.some((u) => u.includes('favicon'))).toBe(false);
     });
 
     it('filters service-worker URLs', async () => {
       await fetchAndFlush('http://localhost/service-worker.js');
       const urls = getSentUrls();
-      expect(urls.some(u => u.includes('service-worker'))).toBe(false);
+      expect(urls.some((u) => u.includes('service-worker'))).toBe(false);
     });
 
     it('filters multiple noise patterns in a single URL', async () => {
       await fetchAndFlush('https://www.googletagmanager.com/gtag/js?id=GA_TRACKING_ID');
       const urls = getSentUrls();
-      expect(urls.some(u => u.toLowerCase().includes('googletagmanager'))).toBe(false);
+      expect(urls.some((u) => u.toLowerCase().includes('googletagmanager'))).toBe(false);
     });
   });
 });

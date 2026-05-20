@@ -15,10 +15,7 @@
  * - AbortController support: detects aborted requests
  */
 
-import type {
-  NetworkRequestEntry,
-  FloTraceWebSocketClient,
-} from '@flotrace/runtime-core';
+import type { NetworkRequestEntry, FloTraceWebSocketClient } from '@flotrace/runtime-core';
 import {
   getCurrentRenderingFiber,
   getComponentNameFromFiber,
@@ -40,25 +37,42 @@ const MAX_ANCESTOR_CHAIN = 3;
 /** URL patterns to filter out (analytics, dev tools, static assets, etc.) */
 const NOISE_URL_PATTERNS: RegExp[] = [
   // Analytics & tracking
-  /google-analytics\.com/i, /googletagmanager\.com/i,
-  /facebook\.com\/tr/i, /segment\.io/i, /mixpanel\.com/i,
-  /amplitude\.com/i, /hotjar\.com/i, /fullstory\.com/i,
-  /sentry\.io/i, /bugsnag\.com/i, /datadog/i,
-  /clarity\.ms/i, /plausible\.io/i,
+  /google-analytics\.com/i,
+  /googletagmanager\.com/i,
+  /facebook\.com\/tr/i,
+  /segment\.io/i,
+  /mixpanel\.com/i,
+  /amplitude\.com/i,
+  /hotjar\.com/i,
+  /fullstory\.com/i,
+  /sentry\.io/i,
+  /bugsnag\.com/i,
+  /datadog/i,
+  /clarity\.ms/i,
+  /plausible\.io/i,
   // Development tools
-  /webpack-dev-server/i, /__webpack_hmr/i, /\.hot-update\./i,
-  /\.map$/, /sourcemap/i,
-  /__nextjs_original-stack-frame/i, /__nextjs_launch-editor/i,
+  /webpack-dev-server/i,
+  /__webpack_hmr/i,
+  /\.hot-update\./i,
+  /\.map$/,
+  /sourcemap/i,
+  /__nextjs_original-stack-frame/i,
+  /__nextjs_launch-editor/i,
   /on-demand-entries-ping/i,
   // Browser resources
-  /favicon\.ico/i, /robots\.txt/i, /manifest\.json/i,
-  /service-worker/i, /sw\.js/i,
+  /favicon\.ico/i,
+  /robots\.txt/i,
+  /manifest\.json/i,
+  /service-worker/i,
+  /sw\.js/i,
   // Static assets
-  /\/_next\/static\//i, /\/_next\/image/i,
+  /\/_next\/static\//i,
+  /\/_next\/image/i,
   // FloTrace's own WebSocket
   /127\.0\.0\.1:3457/,
   // Chrome extensions
-  /chrome-extension:/i, /moz-extension:/i,
+  /chrome-extension:/i,
+  /moz-extension:/i,
 ];
 
 // ============================================================================
@@ -137,7 +151,6 @@ const dedupeWindow = new Map<string, number>();
 // is unchanged.
 
 export { findFetchOrigin, hasActiveTags } from '@flotrace/runtime-core';
-
 
 // ============================================================================
 // Install / Uninstall
@@ -289,11 +302,15 @@ function patchFetch(): void {
 
     // Check for AbortSignal
     if (init?.signal) {
-      init.signal.addEventListener('abort', () => {
-        entry.state = 'aborted';
-        entry.durationMs = performance.now() - startTime;
-        pushEntry(entry);
-      }, { once: true });
+      init.signal.addEventListener(
+        'abort',
+        () => {
+          entry.state = 'aborted';
+          entry.durationMs = performance.now() - startTime;
+          pushEntry(entry);
+        },
+        { once: true },
+      );
     }
 
     // Push pending entry
@@ -366,8 +383,16 @@ function patchXhr(): void {
 
       // responseType='json': browser already parsed it; tag xhr.response directly
       // (same object reference the caller will read — no JSON.parse call happens)
-      if (self.responseType === 'json' && self.response !== null && typeof self.response === 'object') {
-        try { tagFetchData(self.response, requestId, 0); } catch { /* best-effort */ }
+      if (
+        self.responseType === 'json' &&
+        self.response !== null &&
+        typeof self.response === 'object'
+      ) {
+        try {
+          tagFetchData(self.response, requestId, 0);
+        } catch {
+          /* best-effort */
+        }
         return;
       }
 
@@ -463,7 +488,11 @@ function patchResponseJson(): void {
     const data = await originalResponseJson!.call(this);
     const requestId = responseToRequestId.get(this);
     if (requestId && data !== null && typeof data === 'object') {
-      try { tagFetchData(data, requestId, 0); } catch { /* best-effort */ }
+      try {
+        tagFetchData(data, requestId, 0);
+      } catch {
+        /* best-effort */
+      }
     }
     return data;
   };
@@ -494,7 +523,11 @@ function patchJsonParse(): void {
       result !== null &&
       typeof result === 'object'
     ) {
-      try { tagFetchData(result, activeXhrRequestId, 0); } catch { /* best-effort */ }
+      try {
+        tagFetchData(result, activeXhrRequestId, 0);
+      } catch {
+        /* best-effort */
+      }
       activeXhrRequestId = null;
       activeXhrResponseText = null;
     }
@@ -590,10 +623,7 @@ function parseUrl(url: string): { path: string; host: string } {
 }
 
 /** Pre-combined regex for O(1) noise URL matching instead of iterating 25 patterns */
-const COMBINED_NOISE_PATTERN = new RegExp(
-  NOISE_URL_PATTERNS.map(r => r.source).join('|'),
-  'i',
-);
+const COMBINED_NOISE_PATTERN = new RegExp(NOISE_URL_PATTERNS.map((r) => r.source).join('|'), 'i');
 
 function isNoiseUrl(url: string): boolean {
   return COMBINED_NOISE_PATTERN.test(url);
@@ -617,7 +647,8 @@ function parseXhrContentLength(xhr: XMLHttpRequest): number | null {
 function hasHeader(init: RequestInit | undefined, name: string): boolean {
   if (!init?.headers) return false;
   if (init.headers instanceof Headers) return init.headers.has(name);
-  if (Array.isArray(init.headers)) return init.headers.some(([k]) => k.toLowerCase() === name.toLowerCase());
+  if (Array.isArray(init.headers))
+    return init.headers.some(([k]) => k.toLowerCase() === name.toLowerCase());
   if (typeof init.headers === 'object') {
     return Object.keys(init.headers).some((k) => k.toLowerCase() === name.toLowerCase());
   }
@@ -650,7 +681,11 @@ function upsertAndPrune(
   maxSize: number,
 ): NetworkRequestEntry[] {
   const existingIdx = idxMap.get(entry.requestId);
-  if (existingIdx !== undefined && existingIdx < buf.length && buf[existingIdx]?.requestId === entry.requestId) {
+  if (
+    existingIdx !== undefined &&
+    existingIdx < buf.length &&
+    buf[existingIdx]?.requestId === entry.requestId
+  ) {
     buf[existingIdx] = entry; // in-place update — same array reference
     return buf;
   }

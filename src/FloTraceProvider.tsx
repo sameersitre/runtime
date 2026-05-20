@@ -1,5 +1,20 @@
-import React, { useCallback, useEffect, useRef, createContext, useContext, type ReactNode, Profiler } from 'react';
-import type { FloTraceConfig, ResolvedFloTraceConfig, TrackingOptions, ZustandStoreApi, ReduxStoreApi, TanStackQueryClientApi } from '@flotrace/runtime-core';
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  createContext,
+  useContext,
+  type ReactNode,
+  Profiler,
+} from 'react';
+import type {
+  FloTraceConfig,
+  ResolvedFloTraceConfig,
+  TrackingOptions,
+  ZustandStoreApi,
+  ReduxStoreApi,
+  TanStackQueryClientApi,
+} from '@flotrace/runtime-core';
 import {
   DEFAULT_CONFIG,
   getWebSocketClient,
@@ -35,7 +50,11 @@ import pkg from '../package.json';
 
 const RUNTIME_VERSION: string = pkg.version;
 import { installRouterTracker, uninstallRouterTracker } from './routerTracker';
-import { installNetworkTracker, uninstallNetworkTracker, prewarmNetworkTracker } from './networkTracker';
+import {
+  installNetworkTracker,
+  uninstallNetworkTracker,
+  prewarmNetworkTracker,
+} from './networkTracker';
 
 // Module-level timer for deferred cleanup (React Strict Mode handling).
 // When Strict Mode unmounts then remounts, we cancel this timer so the
@@ -122,7 +141,10 @@ export interface FloTraceProviderProps {
    * </FloTraceProvider>
    * ```
    */
-  stores?: Record<string, { subscribe: (...args: unknown[]) => () => void; getState: () => Record<string, unknown> }>;
+  stores?: Record<
+    string,
+    { subscribe: (...args: unknown[]) => () => void; getState: () => Record<string, unknown> }
+  >;
   /**
    * Optional Redux store to track. State changes are shown in FloTrace's Redux panel.
    *
@@ -168,7 +190,13 @@ export interface FloTraceProviderProps {
  * );
  * ```
  */
-export function FloTraceProvider({ children, config = {}, stores, reduxStore, queryClient }: FloTraceProviderProps): JSX.Element {
+export function FloTraceProvider({
+  children,
+  config = {},
+  stores,
+  reduxStore,
+  queryClient,
+}: FloTraceProviderProps): JSX.Element {
   // Refuse to attach inside React Native. Codebases that target both web and native
   // often wrap their shared root with whichever provider they imported first — without
   // this guard, the web provider would try to patch a non-existent DOM on the RN bundle.
@@ -179,7 +207,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
   ) {
     console.warn(
       '[FloTrace] FloTraceProvider (from @flotrace/runtime) detected a React Native environment. ' +
-      'Install @flotrace/runtime-native and use FloTraceProviderNative instead. Skipping attach.',
+        'Install @flotrace/runtime-native and use FloTraceProviderNative instead. Skipping attach.',
     );
     return <>{children}</>;
   }
@@ -257,198 +285,216 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
     const unsubMessage = client.onMessage((message) => {
       try {
         switch (message.type) {
-        // Heartbeat liveness is handled by the dedicated `runtime:pong` path
-        // in websocketClient. We intentionally do NOT re-send `runtime:ready`
-        // on every `ext:ping` — a truncated ready (only appName, no appId /
-        // platform / versions) would clobber the server's client registry
-        // metadata on every 5s tick. The initial `onopen` ready is authoritative.
-        case 'ext:ping':
-          break;
+          // Heartbeat liveness is handled by the dedicated `runtime:pong` path
+          // in websocketClient. We intentionally do NOT re-send `runtime:ready`
+          // on every `ext:ping` — a truncated ready (only appName, no appId /
+          // platform / versions) would clobber the server's client registry
+          // metadata on every 5s tick. The initial `onopen` ready is authoritative.
+          case 'ext:ping':
+            break;
 
-        case 'ext:startTracking':
-          trackingOptionsRef.current = message.options || {};
-          // Each tracker installed independently so one failure doesn't block others
-          if (message.options?.trackZustand && storesRef.current && Object.keys(storesRef.current).length > 0) {
-            safeTrackerOp('Zustand install', () =>
-              installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client));
+          case 'ext:startTracking':
+            trackingOptionsRef.current = message.options || {};
+            // Each tracker installed independently so one failure doesn't block others
+            if (
+              message.options?.trackZustand &&
+              storesRef.current &&
+              Object.keys(storesRef.current).length > 0
+            ) {
+              safeTrackerOp('Zustand install', () =>
+                installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client),
+              );
+            }
+            if (message.options?.trackRedux && reduxStoreRef.current) {
+              safeTrackerOp('Redux install', () =>
+                installReduxTracker(reduxStoreRef.current!, client),
+              );
+            }
+            if (message.options?.trackTanstackQuery && queryClientRef.current) {
+              safeTrackerOp('TanStack Query install', () =>
+                installTanStackQueryTracker(queryClientRef.current!, client),
+              );
+            }
+            if (message.options?.trackRouter) {
+              safeTrackerOp('Router install', () => installRouterTracker(client));
+            }
+            if (message.options?.trackNetwork) {
+              safeTrackerOp('Network install', () => installNetworkTracker(client));
+            }
+            // Timeline tracker — always install with tracking (captures mount/render events)
+            safeTrackerOp('Timeline install', () => installTimelineTracker(client));
+            console.log('[FloTrace] Tracking started with options:', message.options);
+            break;
+
+          case 'ext:stopTracking':
+            trackingOptionsRef.current = {};
+            // Per-tracker uninstall so one failure doesn't block others
+            safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
+            safeTrackerOp('Redux uninstall', uninstallReduxTracker);
+            safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
+            safeTrackerOp('Router uninstall', uninstallRouterTracker);
+            safeTrackerOp('Timeline uninstall', uninstallTimelineTracker);
+            safeTrackerOp('Network uninstall', uninstallNetworkTracker);
+            console.log('[FloTrace] Tracking stopped');
+            break;
+
+          case 'ext:startTreeTracking':
+            // Walker already installed eagerly on mount — ensure it's running
+            installFiberTreeWalker();
+            break;
+
+          case 'ext:stopTreeTracking':
+            uninstallFiberTreeWalker();
+            console.log('[FloTrace] Tree tracking stopped');
+            break;
+
+          case 'ext:requestNodeProps': {
+            const props = getNodeProps(message.nodeId);
+            client.sendImmediate({
+              type: 'runtime:nodeProps',
+              nodeId: message.nodeId,
+              props: props || {},
+              timestamp: Date.now(),
+            });
+            break;
           }
-          if (message.options?.trackRedux && reduxStoreRef.current) {
-            safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
+
+          case 'ext:requestNodeHooks': {
+            const hooks = getNodeHooks(message.nodeId);
+            client.sendImmediate({
+              type: 'runtime:nodeHooks',
+              nodeId: message.nodeId,
+              hooks: hooks || [],
+              timestamp: Date.now(),
+            });
+            break;
           }
-          if (message.options?.trackTanstackQuery && queryClientRef.current) {
-            safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
+
+          case 'ext:requestNodeEffects': {
+            const effects = getNodeEffects(message.nodeId);
+            client.sendImmediate({
+              type: 'runtime:nodeEffects',
+              nodeId: message.nodeId,
+              effects: effects || [],
+              timestamp: Date.now(),
+            });
+            break;
           }
-          if (message.options?.trackRouter) {
+
+          case 'ext:requestDetailedRenderReason': {
+            const reason = getDetailedRenderReason(message.nodeId);
+            if (reason) {
+              client.sendImmediate({
+                type: 'runtime:detailedRenderReason',
+                nodeId: message.nodeId,
+                reason,
+                timestamp: Date.now(),
+              });
+            }
+            break;
+          }
+
+          case 'ext:requestFullSnapshot':
+            requestFullSnapshot();
+            console.log('[FloTrace] Full snapshot requested by extension');
+            break;
+
+          case 'ext:requestTimeline': {
+            const events = getTimeline(message.nodeId);
+            const componentName =
+              message.nodeId.split('/').pop()?.replace(/-\d+$/, '') ?? 'Unknown';
+            for (const event of events) {
+              client.sendImmediate({
+                type: 'runtime:timelineEvent',
+                nodeId: message.nodeId,
+                componentName,
+                event,
+              });
+            }
+            break;
+          }
+
+          // Value Lineage — resolve the origin chain for a prop or hook value.
+          case 'ext:traceValue': {
+            try {
+              const trace = resolveValueTrace({
+                nodeId: message.nodeId,
+                propPath: message.propPath,
+                hookPath: message.hookPath,
+              });
+              client.sendImmediate({
+                type: 'runtime:valueTrace',
+                trace: { requestId: message.requestId, ...trace },
+                timestamp: Date.now(),
+              });
+            } catch (error) {
+              // Resolver must never throw into the message loop — reply with an empty trace.
+              console.error('[FloTrace] resolveValueTrace threw:', error);
+              client.sendImmediate({
+                type: 'runtime:valueTrace',
+                trace: {
+                  requestId: message.requestId,
+                  rootNodeId: message.nodeId,
+                  rootPropPath: message.propPath,
+                  rootHookPath: message.hookPath,
+                  steps: [],
+                  resolvedAtMs: Date.now(),
+                  error: 'value-not-found',
+                },
+                timestamp: Date.now(),
+              });
+            }
+            break;
+          }
+
+          case 'ext:startNetworkCapture':
+            safeTrackerOp('Network capture start', () => installNetworkTracker(client));
+            break;
+
+          case 'ext:stopNetworkCapture':
+            safeTrackerOp('Network capture stop', uninstallNetworkTracker);
+            break;
+
+          // --- Individual tracker start/stop (sidebar panel show/hide) ---
+
+          case 'ext:startReduxTracking':
+            if (reduxStoreRef.current)
+              safeTrackerOp('Redux install', () =>
+                installReduxTracker(reduxStoreRef.current!, client),
+              );
+            break;
+          case 'ext:stopReduxTracking':
+            safeTrackerOp('Redux uninstall', uninstallReduxTracker);
+            break;
+          case 'ext:startRouterTracking':
             safeTrackerOp('Router install', () => installRouterTracker(client));
-          }
-          if (message.options?.trackNetwork) {
-            safeTrackerOp('Network install', () => installNetworkTracker(client));
-          }
-          // Timeline tracker — always install with tracking (captures mount/render events)
-          safeTrackerOp('Timeline install', () => installTimelineTracker(client));
-          console.log('[FloTrace] Tracking started with options:', message.options);
-          break;
+            break;
+          case 'ext:stopRouterTracking':
+            safeTrackerOp('Router uninstall', uninstallRouterTracker);
+            break;
+          case 'ext:startZustandTracking':
+            if (storesRef.current && Object.keys(storesRef.current).length > 0) {
+              safeTrackerOp('Zustand install', () =>
+                installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client),
+              );
+            }
+            break;
+          case 'ext:stopZustandTracking':
+            safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
+            break;
+          case 'ext:startTanstackTracking':
+            if (queryClientRef.current)
+              safeTrackerOp('TanStack Query install', () =>
+                installTanStackQueryTracker(queryClientRef.current!, client),
+              );
+            break;
+          case 'ext:stopTanstackTracking':
+            safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
+            break;
 
-        case 'ext:stopTracking':
-          trackingOptionsRef.current = {};
-          // Per-tracker uninstall so one failure doesn't block others
-          safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
-          safeTrackerOp('Redux uninstall', uninstallReduxTracker);
-          safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
-          safeTrackerOp('Router uninstall', uninstallRouterTracker);
-          safeTrackerOp('Timeline uninstall', uninstallTimelineTracker);
-          safeTrackerOp('Network uninstall', uninstallNetworkTracker);
-          console.log('[FloTrace] Tracking stopped');
-          break;
-
-        case 'ext:startTreeTracking':
-          // Walker already installed eagerly on mount — ensure it's running
-          installFiberTreeWalker();
-          break;
-
-        case 'ext:stopTreeTracking':
-          uninstallFiberTreeWalker();
-          console.log('[FloTrace] Tree tracking stopped');
-          break;
-
-        case 'ext:requestNodeProps': {
-          const props = getNodeProps(message.nodeId);
-          client.sendImmediate({
-            type: 'runtime:nodeProps',
-            nodeId: message.nodeId,
-            props: props || {},
-            timestamp: Date.now(),
-          });
-          break;
-        }
-
-        case 'ext:requestNodeHooks': {
-          const hooks = getNodeHooks(message.nodeId);
-          client.sendImmediate({
-            type: 'runtime:nodeHooks',
-            nodeId: message.nodeId,
-            hooks: hooks || [],
-            timestamp: Date.now(),
-          });
-          break;
-        }
-
-        case 'ext:requestNodeEffects': {
-          const effects = getNodeEffects(message.nodeId);
-          client.sendImmediate({
-            type: 'runtime:nodeEffects',
-            nodeId: message.nodeId,
-            effects: effects || [],
-            timestamp: Date.now(),
-          });
-          break;
-        }
-
-        case 'ext:requestDetailedRenderReason': {
-          const reason = getDetailedRenderReason(message.nodeId);
-          if (reason) {
-            client.sendImmediate({
-              type: 'runtime:detailedRenderReason',
-              nodeId: message.nodeId,
-              reason,
-              timestamp: Date.now(),
-            });
-          }
-          break;
-        }
-
-        case 'ext:requestFullSnapshot':
-          requestFullSnapshot();
-          console.log('[FloTrace] Full snapshot requested by extension');
-          break;
-
-        case 'ext:requestTimeline': {
-          const events = getTimeline(message.nodeId);
-          const componentName = message.nodeId.split('/').pop()?.replace(/-\d+$/, '') ?? 'Unknown';
-          for (const event of events) {
-            client.sendImmediate({
-              type: 'runtime:timelineEvent',
-              nodeId: message.nodeId,
-              componentName,
-              event,
-            });
-          }
-          break;
-        }
-
-        // Value Lineage — resolve the origin chain for a prop or hook value.
-        case 'ext:traceValue': {
-          try {
-            const trace = resolveValueTrace({
-              nodeId: message.nodeId,
-              propPath: message.propPath,
-              hookPath: message.hookPath,
-            });
-            client.sendImmediate({
-              type: 'runtime:valueTrace',
-              trace: { requestId: message.requestId, ...trace },
-              timestamp: Date.now(),
-            });
-          } catch (error) {
-            // Resolver must never throw into the message loop — reply with an empty trace.
-            console.error('[FloTrace] resolveValueTrace threw:', error);
-            client.sendImmediate({
-              type: 'runtime:valueTrace',
-              trace: {
-                requestId: message.requestId,
-                rootNodeId: message.nodeId,
-                rootPropPath: message.propPath,
-                rootHookPath: message.hookPath,
-                steps: [],
-                resolvedAtMs: Date.now(),
-                error: 'value-not-found',
-              },
-              timestamp: Date.now(),
-            });
-          }
-          break;
-        }
-
-        case 'ext:startNetworkCapture':
-          safeTrackerOp('Network capture start', () => installNetworkTracker(client));
-          break;
-
-        case 'ext:stopNetworkCapture':
-          safeTrackerOp('Network capture stop', uninstallNetworkTracker);
-          break;
-
-        // --- Individual tracker start/stop (sidebar panel show/hide) ---
-
-        case 'ext:startReduxTracking':
-          if (reduxStoreRef.current) safeTrackerOp('Redux install', () => installReduxTracker(reduxStoreRef.current!, client));
-          break;
-        case 'ext:stopReduxTracking':
-          safeTrackerOp('Redux uninstall', uninstallReduxTracker);
-          break;
-        case 'ext:startRouterTracking':
-          safeTrackerOp('Router install', () => installRouterTracker(client));
-          break;
-        case 'ext:stopRouterTracking':
-          safeTrackerOp('Router uninstall', uninstallRouterTracker);
-          break;
-        case 'ext:startZustandTracking':
-          if (storesRef.current && Object.keys(storesRef.current).length > 0) {
-            safeTrackerOp('Zustand install', () => installZustandTracker(storesRef.current as Record<string, ZustandStoreApi>, client));
-          }
-          break;
-        case 'ext:stopZustandTracking':
-          safeTrackerOp('Zustand uninstall', uninstallZustandTracker);
-          break;
-        case 'ext:startTanstackTracking':
-          if (queryClientRef.current) safeTrackerOp('TanStack Query install', () => installTanStackQueryTracker(queryClientRef.current!, client));
-          break;
-        case 'ext:stopTanstackTracking':
-          safeTrackerOp('TanStack Query uninstall', uninstallTanStackQueryTracker);
-          break;
-
-        case 'ext:requestState':
-          // Legacy — kept for backward compatibility
-          break;
+          case 'ext:requestState':
+            // Legacy — kept for backward compatibility
+            break;
         }
       } catch (error) {
         console.error(`[FloTrace] Error handling message type "${message.type}":`, error);
@@ -536,38 +582,41 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
    * Profiler callback — stable reference via useCallback to avoid
    * unnecessary Profiler re-subscriptions on parent re-renders.
    */
-  const onRenderCallback = useCallback((
-    id: string,
-    phase: 'mount' | 'update' | 'nested-update',
-    actualDuration: number,
-    baseDuration: number,
-    _startTime: number,
-    commitTime: number
-  ) => {
-    try {
-      if (!enabledRef.current) return;
+  const onRenderCallback = useCallback(
+    (
+      id: string,
+      phase: 'mount' | 'update' | 'nested-update',
+      actualDuration: number,
+      baseDuration: number,
+      _startTime: number,
+      commitTime: number,
+    ) => {
+      try {
+        if (!enabledRef.current) return;
 
-      const client = getWebSocketClient();
-      if (!client.connected) return;
+        const client = getWebSocketClient();
+        if (!client.connected) return;
 
-      const normalizedPhase = phase === 'nested-update' ? 'update' : phase;
+        const normalizedPhase = phase === 'nested-update' ? 'update' : phase;
 
-      client.send({
-        type: 'runtime:render',
-        componentName: id,
-        phase: normalizedPhase,
-        actualDuration,
-        baseDuration,
-        timestamp: commitTime,
-      });
+        client.send({
+          type: 'runtime:render',
+          componentName: id,
+          phase: normalizedPhase,
+          actualDuration,
+          baseDuration,
+          timestamp: commitTime,
+        });
 
-      // Trigger tree snapshot if tree tracking is active (DOM fallback strategy).
-      // This is a no-op if using the DevTools hook strategy (which is event-driven).
-      requestTreeSnapshot();
-    } catch (error) {
-      console.error('[FloTrace] Error in Profiler callback:', error);
-    }
-  }, []);
+        // Trigger tree snapshot if tree tracking is active (DOM fallback strategy).
+        // This is a no-op if using the DevTools hook strategy (which is event-driven).
+        requestTreeSnapshot();
+      } catch (error) {
+        console.error('[FloTrace] Error in Profiler callback:', error);
+      }
+    },
+    [],
+  );
 
   const contextValue: FloTraceContextValue = {
     connected,
@@ -597,7 +646,7 @@ export function FloTraceProvider({ children, config = {}, stores, reduxStore, qu
  */
 export function withFloTrace<P extends object>(
   Component: React.ComponentType<P>,
-  displayName?: string
+  displayName?: string,
 ): React.FC<P> {
   const name = displayName || Component.displayName || Component.name || 'Unknown';
 
@@ -610,7 +659,7 @@ export function withFloTrace<P extends object>(
       actualDuration: number,
       baseDuration: number,
       startTime: number,
-      commitTime: number
+      commitTime: number,
     ) => {
       try {
         if (!floTrace?.enabled) {
