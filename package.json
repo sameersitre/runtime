@@ -1,6 +1,6 @@
 {
   "name": "@flotrace/runtime",
-  "version": "2.2.4",
+  "version": "2.3.0",
   "description": "Runtime package for FloTrace - enables real-time render tracking in your React app",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -28,7 +28,7 @@
     "release:major": "npm version major && npm publish"
   },
   "dependencies": {
-    "@flotrace/runtime-core": "2.2.4"
+    "@flotrace/runtime-core": "2.3.0"
   },
   "peerDependencies": {
     "react": ">=16.9.0",
