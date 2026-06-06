@@ -115,6 +115,49 @@ Same as the 30-second setup above — wrap `<App />` at the root.
 
 ---
 
+## Source attribution (click-to-IDE)
+
+Exact `file:line:column` attribution on every component powers click-to-IDE, breadcrumb file pills, Hot Call Sites, and accurate user-vs-framework differentiation. **Most web apps need zero config** — Next.js (SWC) and Vite pick it up from `jsxImportSource` plus React's own debug info:
+
+```jsonc
+// tsconfig.json
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "@flotrace/runtime-core"
+  }
+}
+```
+
+The optional Babel plugin (ships **inside this package** — no extra install) adds two things `jsxImportSource` can't: attribution for **Create React App** (whose locked Babel config ignores `jsxImportSource`) and **definition-site** attribution for components instantiated via `React.createElement(C)` from a library (react-router v5 `<Route component={X}>`, HOCs):
+
+```js
+// babel.config.js (or the babel section of your bundler config)
+module.exports = {
+  env: {
+    development: {
+      plugins: ['@flotrace/runtime/babel-plugin'],
+    },
+  },
+};
+```
+
+The `env.development` block keeps it dev-only — production bundles stay clean. Restart the dev server with `--reset-cache` after adding it. (React Native projects use `@flotrace/runtime-native/babel-plugin` instead — it's the same plugin, re-exported from each adapter.)
+
+> **Create React App** ignores a project-level `babel.config.js` — its Babel config is locked. To add the plugin you need [CRACO](https://craco.js.org/) or `react-app-rewired`. With CRACO, add it under `babel.plugins` in `craco.config.js`:
+>
+> ```js
+> // craco.config.js
+> module.exports = {
+>   babel: {
+>     plugins:
+>       process.env.NODE_ENV === 'development' ? ['@flotrace/runtime/babel-plugin'] : [],
+>   },
+> };
+> ```
+
+---
+
 ## Wire up your state stores
 
 State tracking is the killer feature. Pass your stores to the provider and they show up in the desktop's State panel with live diffs:

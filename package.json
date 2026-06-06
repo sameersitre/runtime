@@ -10,10 +10,32 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./babel-plugin": {
+      "types": "./babel-plugin.d.ts",
+      "default": "./babel-plugin.js"
+    },
+    "./jsx-runtime": {
+      "types": "./jsx-runtime.d.ts",
+      "import": "./jsx-runtime.mjs",
+      "require": "./jsx-runtime.js"
+    },
+    "./jsx-dev-runtime": {
+      "types": "./jsx-dev-runtime.d.ts",
+      "import": "./jsx-dev-runtime.mjs",
+      "require": "./jsx-dev-runtime.js"
     }
   },
   "files": [
     "dist",
+    "babel-plugin.js",
+    "babel-plugin.d.ts",
+    "jsx-runtime.js",
+    "jsx-runtime.mjs",
+    "jsx-runtime.d.ts",
+    "jsx-dev-runtime.js",
+    "jsx-dev-runtime.mjs",
+    "jsx-dev-runtime.d.ts",
     "LICENSE",
     "README.md"
   ],
